@@ -1,6 +1,8 @@
 -module(utils).
 -export([generate_node_id_160bit/0, order_unique/2, find_bucket_index/2, xor_distance/2, 
-         calculate_key/1, generate_random_id_in_bucket/2, is_bootstrap/1]).
+         calculate_key/1, generate_random_id_in_bucket/2, is_bootstrap/1, print_buckets/4,
+         print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3, 
+        make_similar_ids/1]).
 
 
 % Calculate XOR between two 160 bit IDs
@@ -84,7 +86,7 @@ generate_random_id_in_bucket(LocalId, BucketIndex) ->
 order_unique(Nodes, TargetID) ->
 	UniqueNodes = remove_duplicates(Nodes),
 	lists:sort(
-		fun({ID1, _Pid1}, {ID2, _Pid2}) -> 
+		fun({_, ID1, _Pid1}, {_, ID2, _Pid2}) -> 
 			xor_distance(ID1, TargetID) < xor_distance(ID2, TargetID) 
 		end,
 		UniqueNodes
@@ -105,6 +107,71 @@ is_bootstrap(Name) ->
         "bootstrap" ++ _ -> true;
         _ -> false
     end.
+
+
+%%
+%% Pretty prints the contents of the buckets list
+%%
+print_buckets(LocalName, Pid, Buckets) ->
+    print_buckets(LocalName, Pid, Buckets, debug).
+
+print_buckets(LocalName, Pid, Buckets, LogLevel) ->
+    Header = lists:flatten(io_lib:format("~n~n------ BUCKETS OF ~p (~p)------~n", [LocalName, Pid])),
+    Footer = io_lib:format("~n------ END BUCKETS ------~n", []),
+    Lines = print_buckets_acc(LocalName, Buckets, 1, []),
+    log_msg(LogLevel, "~p (~p): ~s~s~s", [LocalName, Pid, Header, Lines, Footer]).
+
+print_buckets_acc(_, [], _Index, Acc) ->
+    string:join(lists:reverse(Acc), "\n");
+print_buckets_acc(LocalName, [H | T], Index, Acc) ->
+    case H of
+        [] -> print_buckets_acc(LocalName, T, Index + 1, Acc);
+        _ -> 
+            Nodes = [{Name, Pid} || {Name, _, Pid} <- H],
+            Line = io_lib:format("--- ~p: ~p", [Index, Nodes]),
+            print_buckets_acc(LocalName, T, Index + 1, [lists:flatten(Line) | Acc])
+    end.
+
+
+%%
+%% Pretty prints the contents of the storage
+%%
+print_storage(LocalName, Pid, Storage) ->
+    print_storage(LocalName, Pid, Storage, debug).
+
+print_storage(LocalName, Pid, Storage, LogLevel) -> 
+    Pairs = maps:to_list(Storage),
+    Lines = [format_line(Key, Entry) || {Key, Entry} <- Pairs],
+    Header = lists:flatten(io_lib:format("~n~n------ STORAGE OF ~p (~p)------~n", [LocalName, Pid])),
+    Footer = io_lib:format("~n------ END STORAGE ------~n~n", []),
+    Text = string:join(Lines, "\n"),
+    log_msg(LogLevel, "~p (~p): ~s~s~s", [LocalName, Pid, Header, lists:flatten(Text), Footer]).
+
+format_line(_Key, Entry) ->
+    {Value, Expiry, RepublishTime, {_OwnerID, OwnerPid}} = Entry,
+    Line = io_lib:format("--- ~p (value), ~p (expiry), ~p (republish), ~p (owner)", 
+        [Value, Expiry, RepublishTime, OwnerPid]),
+    lists:flatten(Line).
+
+
+%%
+%% Pretty prints the provided list of nodes of the form {NodeName, NodeId, NodePid}
+%%
+print_nodes(Nodes, Prefix) ->
+    print_nodes(Nodes, Prefix, debug).
+
+print_nodes(Nodes, StringPrefix, LogLevel) ->
+    NodesMapped = lists:map(fun({NodeName, _, NodePid}) -> {NodeName, NodePid} end, Nodes),
+    log_msg(LogLevel, "~n~s~p~n", [StringPrefix, NodesMapped]).
+
+
+%% Dynamic log level
+log_msg(debug, Fmt, Args) -> log:debug(Fmt, Args);
+log_msg(info, Fmt, Args)  -> log:info(Fmt, Args);
+log_msg(warn, Fmt, Args)  -> log:warn(Fmt, Args);
+log_msg(error, Fmt, Args) -> log:error(Fmt, Args);
+log_msg(important, Fmt, Args) -> log:important(Fmt, Args);
+log_msg(_, Fmt, Args)     -> log:debug(Fmt, Args).  % fallback
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -137,3 +204,21 @@ find_msb_set(Distance, BitPos) ->
             % Current bit is one -> found MSB
             BitPos
     end.
+
+% Funzione per testare la distanza XOR
+make_similar_ids(N) when N =< 160 ->
+    % Genera i primi N bit condivisi
+    SharedBits = crypto:strong_rand_bytes((N + 7) div 8),
+    <<SharedPrefix: N, _/bitstring>> = SharedBits,
+
+    % Completa con bit random diversi dopo i primi N bit
+    Remainder1 = crypto:strong_rand_bytes((160 - N + 7) div 8),
+    <<Suffix1: (160 - N), _/bitstring>> = Remainder1,
+
+    Remainder2 = crypto:strong_rand_bytes((160 - N + 7) div 8),
+    <<Suffix2: (160 - N), _/bitstring>> = Remainder2,
+
+    ID1 = <<SharedPrefix: N, Suffix1: (160 - N)>>,
+    ID2 = <<SharedPrefix: N, Suffix2: (160 - N)>>,
+
+    {ID1, ID2}.

@@ -18,12 +18,18 @@
 ]).
 
 -define(DEFAULT_LEVEL, info).
-
 -define(LOG_LEVEL_KEY, '__log_level__').
+-define(LOG_FILE_KEY, '__log_file__').
 
 start() ->
     put(?LOG_LEVEL_KEY, ?DEFAULT_LEVEL),
-    io:format("Log system initialized with default level: ~p~n", [?DEFAULT_LEVEL]).
+    case file:open("log.txt", [write, utf8]) of
+        {ok, Fd} ->
+            put(?LOG_FILE_KEY, Fd),
+            io:format("Log system initialized with file logging.~n");
+        {error, Reason} ->
+            io:format("Failed to open log file: ~p~n", [Reason])
+    end.
 
 set_level(Level) ->
     case level(Level) of
@@ -36,7 +42,6 @@ set_level(Level) ->
     end.
 
 set_level_global(Level) ->
-    % Imposta per tutti i processi
     case level(Level) of
         {ok, _} ->
             persistent_term:put(?LOG_LEVEL_KEY, Level),
@@ -81,7 +86,8 @@ log(Level, Format) ->
         true ->
             Timestamp = log_timestamp(),
             Msg = lists:flatten(io_lib:format(Format, [])),
-            io:format("~s [~s] ~s~n", [Timestamp, string:to_upper(atom_to_list(Level)), Msg]);
+            Line = io_lib:format("~s [~s] ~s~n", [Timestamp, string:to_upper(atom_to_list(Level)), Msg]),
+            write_log(lists:flatten(Line));
         false ->
             ok
     end.
@@ -91,7 +97,8 @@ log(Level, Format, Args) ->
         true ->
             Timestamp = log_timestamp(),
             Msg = lists:flatten(io_lib:format(Format, Args)),
-            io:format("~s [~s] ~s~n", [Timestamp, string:to_upper(atom_to_list(Level)), Msg]);
+            Line = io_lib:format("~s [~s] ~s~n", [Timestamp, string:to_upper(atom_to_list(Level)), Msg]),
+            write_log(lists:flatten(Line));
         false ->
             ok
     end.
@@ -101,6 +108,13 @@ should_log(Level) ->
     case {level(Level), level(Current)} of
         {{ok, L1}, {ok, L2}} -> L1 >= L2;
         _ -> false 
+    end.
+
+write_log(Line) ->
+    io:put_chars(Line),
+    case get(?LOG_FILE_KEY) of
+        undefined -> io:format("~s", [Line]); % stdout fallback
+        Fd -> file:write(Fd, Line)
     end.
 
 
