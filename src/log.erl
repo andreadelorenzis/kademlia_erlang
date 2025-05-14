@@ -1,20 +1,16 @@
 -module(log).
 -export([
     start/0, 
-    log/3, 
-    log/2, 
+    log/3, log/2, 
     set_level/1,
     set_level_global/1,
-    debug/1,
-    debug/2,
-    info/1,
-    info/2,
-    warn/1,
-    warn/2,
-    error/1,
-    error/2,
-    important/1,
-    important/2
+    debug/1, debug/2,
+    info/1, info/2,
+    warn/1, warn/2,
+    error/1, error/2,
+    important/1, important/2,
+    raw/2, raw/3,
+    clean_console/0
 ]).
 
 -define(DEFAULT_LEVEL, info).
@@ -25,7 +21,7 @@ start() ->
     put(?LOG_LEVEL_KEY, ?DEFAULT_LEVEL),
     case file:open("log.txt", [write, utf8]) of
         {ok, Fd} ->
-            put(?LOG_FILE_KEY, Fd),
+            persistent_term:put(?LOG_FILE_KEY, Fd),
             io:format("Log system initialized with file logging.~n");
         {error, Reason} ->
             io:format("Failed to open log file: ~p~n", [Reason])
@@ -103,6 +99,39 @@ log(Level, Format, Args) ->
             ok
     end.
 
+write_log(Line) ->
+    io:put_chars(Line),
+    case persistent_term:get(?LOG_FILE_KEY) of
+        undefined -> io:format("~nfailed to log~n"); % stdout fallback
+        Fd -> file:write(Fd, Line)
+    end.
+
+clean_console() ->
+    % Clear screen and move cursor to top-left
+    io:format("\e[2J\e[H").
+
+
+raw(Level, Format) ->
+    raw(Level, Format, []).
+
+raw(Level, Format, Args) ->
+    case should_log(Level) of
+        true ->
+            Msg = lists:flatten(io_lib:format(Format, Args)),
+            write_raw_log(Msg);
+        false ->
+            ok
+    end.
+
+write_raw_log(Line) ->
+    LineStr = lists:flatten(Line) ++ "\n",
+    io:put_chars(LineStr),
+    case persistent_term:get(?LOG_FILE_KEY) of
+        undefined -> ok;
+        Fd -> file:write(Fd, LineStr)
+    end.
+
+
 should_log(Level) ->
     Current =  persistent_term:get(?LOG_LEVEL_KEY, ?DEFAULT_LEVEL),
     case {level(Level), level(Current)} of
@@ -110,17 +139,13 @@ should_log(Level) ->
         _ -> false 
     end.
 
-write_log(Line) ->
-    io:put_chars(Line),
-    case get(?LOG_FILE_KEY) of
-        undefined -> io:format("~s", [Line]); % stdout fallback
-        Fd -> file:write(Fd, Line)
-    end.
-
 
 log_timestamp() ->
     {{Y, M, D}, {H, Min, S}} = calendar:local_time(),
-    lists:flatten(io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B", [Y, M, D, H, Min, S])).
+    {_Mega, _Sec, Micro} = erlang:timestamp(),
+    Milli = Micro div 1000,
+    lists:flatten(io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B.~3..0B", 
+        [Y, M, D, H, Min, S, Milli])).
     
 level(debug) -> {ok, 0};
 level(info) -> {ok, 1};

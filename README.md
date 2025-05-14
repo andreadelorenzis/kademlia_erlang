@@ -7,4 +7,3 @@ To compile all the sources execute this command from the shell:
 ```bash
 make:all([{outdir, './ebin'}]).
 ```
-

@@ -1,46 +1,43 @@
 -module(utils).
--export([generate_node_id_160bit/0, order_unique/2, find_bucket_index/2, xor_distance/2, 
-         calculate_key/1, generate_random_id_in_bucket/2, is_bootstrap/1, print_buckets/4,
-         print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3, 
-        make_similar_ids/1]).
+-export([generate_node_id/1, order_unique/2, find_bucket_index/3, xor_distance/2, 
+         calculate_key/2, generate_random_id_in_bucket/3, is_bootstrap/1, print_buckets/4,
+         print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3]).
 
 
-% Calculate XOR between two 160 bit IDs
-xor_distance(A, B) when byte_size(A) =:= 20, byte_size(B) =:= 20 ->
+% Calculate XOR between binary IDs
+xor_distance(A, B) ->
     list_to_binary(lists:map(fun({X, Y}) -> X bxor Y end, 
                    lists:zip(binary_to_list(A), binary_to_list(B)))).
 
 
 
-% Generate 20 random bytes (160 bit)
-generate_node_id_160bit() ->
-    crypto:strong_rand_bytes(20).
+% Generate a random ID with specified number of bytes
+generate_node_id(NumBytes) when is_integer(NumBytes), NumBytes > 0 ->
+    crypto:strong_rand_bytes(NumBytes).
 
-% Use SHA-1 on the value to create a 160 bit key
-calculate_key(Value) ->
-    BinaryValue = to_binary(Value),
-    crypto:hash(sha, BinaryValue).
-
-to_binary(Value) when is_binary(Value) -> 
-    Value;
-to_binary(Value) when is_list(Value) -> 
-    case io_lib:printable_list(Value) of  % String (list of characters)
-        true -> list_to_binary(Value);
-        false -> crash
-    end;
-to_binary(Value) when is_atom(Value) -> 
-    atom_to_binary(Value, utf8);
-to_binary(Value) when is_integer(Value) -> 
-    integer_to_binary(Value);
-to_binary(Value) when is_float(Value) -> 
-    float_to_binary(Value, [{decimals, 10}, compact]).
+% Generate an hash of a key with a specified number of bytes
+calculate_key(Value, NumBytes) when is_integer(NumBytes), NumBytes > 0 ->
+    % Convert key to binary
+    ValueBin = if
+        is_binary(Value) -> Value;
+        is_list(Value) -> list_to_binary(Value);
+        true -> term_to_binary(Value)
+    end,
+    
+    % Generate hash SHA-256 of the value
+    FullHash = crypto:hash(sha256, ValueBin),
+    
+    % Take only desired number of bytes
+    BytesToUse = min(NumBytes, byte_size(FullHash)),
+    <<HashPart:BytesToUse/binary, _/binary>> = FullHash,
+    HashPart.
 
 
 % Generate a random ID in the specified bucket
-generate_random_id_in_bucket(LocalId, BucketIndex) ->
+generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
 
-    % Generate random 160 bit ID (20 bytes)
-    RandomId = crypto:strong_rand_bytes(20), 
+    % Generate random binary ID of the specified length
+    RandomId = crypto:strong_rand_bytes(IdByteLength), 
     
     % Create an ID that is formed by concatenating a prefix equal to LocalID (up to BucketIndex), 
     % the inverted BucketIndex bit, and the rest from RandomID
@@ -93,12 +90,12 @@ order_unique(Nodes, TargetID) ->
 	).
 
 % Find the most significant bit of difference between the two IDs
-find_bucket_index(LocalId, RemoteId) ->
+find_bucket_index(LocalId, RemoteId, IdBitLength) ->
     % Calculate XOR of the two IDs
     Distance = xor_distance(LocalId, RemoteId),
     
     % Find MSB
-    find_msb_set(Distance). 
+    find_msb_set(Distance, IdBitLength). 
 
 
 is_bootstrap(Name) ->
@@ -187,38 +184,20 @@ remove_duplicates(Nodes) ->
 
 
 % Convert distance xor to integer
-find_msb_set(Distance) when is_binary(Distance) ->
+find_msb_set(Distance, IdBitLength) when is_binary(Distance) ->
     IntDistance = binary:decode_unsigned(Distance),
-    find_msb_set(IntDistance, 0).
+    find_msb_set(IntDistance, 0, IdBitLength).
 
 % Base case: zero distance -> no difference between the two IDs
-find_msb_set(0, _) -> 0;
+find_msb_set(0, _, _) -> 0;
 % Recursive function that iterates on the bits
-find_msb_set(Distance, BitPos) ->
-    BitMask = 1 bsl (159 - BitPos),
+find_msb_set(Distance, BitPos, IdBitLength) ->
+    BitMask = 1 bsl ((IdBitLength-1) - BitPos),
     case Distance band BitMask of
         0 -> 
             % Current bit is zero -> continue to next bit
-            find_msb_set(Distance, BitPos + 1);
+            find_msb_set(Distance, BitPos + 1, IdBitLength);
         _ -> 
             % Current bit is one -> found MSB
             BitPos
     end.
-
-% Funzione per testare la distanza XOR
-make_similar_ids(N) when N =< 160 ->
-    % Genera i primi N bit condivisi
-    SharedBits = crypto:strong_rand_bytes((N + 7) div 8),
-    <<SharedPrefix: N, _/bitstring>> = SharedBits,
-
-    % Completa con bit random diversi dopo i primi N bit
-    Remainder1 = crypto:strong_rand_bytes((160 - N + 7) div 8),
-    <<Suffix1: (160 - N), _/bitstring>> = Remainder1,
-
-    Remainder2 = crypto:strong_rand_bytes((160 - N + 7) div 8),
-    <<Suffix2: (160 - N), _/bitstring>> = Remainder2,
-
-    ID1 = <<SharedPrefix: N, Suffix1: (160 - N)>>,
-    ID2 = <<SharedPrefix: N, Suffix2: (160 - N)>>,
-
-    {ID1, ID2}.
