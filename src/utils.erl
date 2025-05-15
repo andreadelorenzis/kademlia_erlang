@@ -5,9 +5,12 @@
 
 
 % Calculate XOR between binary IDs
+xor_distance(A, B) when byte_size(A) =:= byte_size(B) ->
+    list_to_binary(
+        lists:map(fun({X, Y}) -> X bxor Y end, 
+                  lists:zip(binary_to_list(A), binary_to_list(B))));
 xor_distance(A, B) ->
-    list_to_binary(lists:map(fun({X, Y}) -> X bxor Y end, 
-                   lists:zip(binary_to_list(A), binary_to_list(B)))).
+    error({invalid_binary_lengths, byte_size(A), byte_size(B)}).
 
 
 
@@ -49,6 +52,7 @@ generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
     BitPos = 7 - (BucketIndex rem 8), 
     
     % Converts the binaries to lists of bytes 
+    log:info("LOCAL ID = ~p", [LocalId]),
     LocalBytes = binary_to_list(LocalId),
     RandomBytes = binary_to_list(RandomId),
     
@@ -69,7 +73,7 @@ generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
     %   bits up to bit pos equal to local byte + 
     %   inverted bit + 
     %   bits after bitPos equal to random byte
-    NewByte = (LocalByte band Mask) bxor (BitMask) bor (RandomByte band (255 - Mask - BitMask)),
+    NewByte = (LocalByte band Mask) bxor (BitMask) bor (RandomByte band (255 - Mask - BitMask)) band 255,
     
     % Remaining bytes are random
     NewIdSuffixBytes = lists:nthtail(BytePos + 1, RandomBytes),

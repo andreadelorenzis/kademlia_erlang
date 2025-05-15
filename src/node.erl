@@ -133,7 +133,7 @@ init_node(ID, BootstrapNode, LocalName, ShellPid) ->
     TimeoutRefs = #{},
     State = maps:merge(NetworkOpts, #{
         local_id => ID,
-        main_pid => self(),
+        self => self(),
         local_name => LocalName,
         buckets => Buckets, 
         storage => Storage,
@@ -322,12 +322,28 @@ node_loop(State) ->
             end;
 
         trigger_final_response -> 
+            log:debug("~p (~p): lookup finalization", [LocalName, Self]),
             finalize_lookup(State);
 
         {republish_response, ok, {_AckNodes, NewBuckets}} ->
             log:debug("~p (~p): received a republish_response", [LocalName, Self]),
-            NewState = reset_lookup_state(State#{buckets => NewBuckets}),
-            node_loop(NewState);
+            node_loop(State#{buckets => NewBuckets});
+
+        {refresh_response, ok, NewBuckets} ->
+            log:debug("~p (~p): received a refresh_response", [LocalName, Self]),
+            Requester = maps:get(requester, State),
+            ToRefresh = maps:get(to_refresh, State),
+            NewToRefresh = ToRefresh - 1,
+            log:debug("~p (~p): ~p remaining buckets to refresh", [LocalName, Self, NewToRefresh]),
+            case NewToRefresh of
+                R when R =< 0 ->
+                    % Refreshed all buckets
+                    log:debug("~p (~p): REFRESH COMPLETE", [LocalName, Self]),
+                    Requester ! {refresh_complete},
+                    node_loop(State#{buckets => NewBuckets});
+                _ ->
+                    node_loop(State#{buckets => NewBuckets, to_refresh => NewToRefresh})
+            end;
 
         % Message received when a pending request from a node goes in Timeout
         {timeout, NodePid} ->
@@ -356,12 +372,17 @@ node_loop(State) ->
             node_loop(State#{storage => NewStorage});
 
         {get_buckets_request, FromPid} ->
-            FromPid ! {buckets_dump, Buckets, LocalName},
+            FromPid ! {buckets_dump, Buckets, {LocalName, LocalId, Self}},
             node_loop(State);
 
         {is_alive_request, FromPid} ->
             FromPid ! {is_alive_response, alive},
             node_loop(State);
+
+        {refresh_buckets, ToRefresh, FromPid} ->
+            NewState = State#{requester => FromPid, to_refresh => ToRefresh},
+            handle_refresh(NewState),
+            node_loop(NewState);
 
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         %% PROTOCOL INTERFACE MESSAGES %%
@@ -462,31 +483,28 @@ handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
     NodesCollected = maps:get(nodes_collected, State),
     VisitedNodes = maps:get(visited_nodes, State),
     LookupMode = maps:get(lookup_mode, State),
-    Main = maps:get(main_process, State, undefined),
     IsLastQuery = maps:get(is_last_query, State, false),
-
-    Self = case Main of
-        undefined -> self();
-        _ -> Main
-    end,
+    Main = maps:get(self, State),
 
     % Remove FromNode from pending requests
     NewPending = lists:delete(FromNode, PendingRequests),
     {FromName, _, FromPid} = FromNode,
-    log:debug("~p (~p): removed ~p (~p) from pending requests", [LocalName, Self, FromName, FromPid]),
+    log:debug("~p (~p): removed ~p (~p) from pending requests", [LocalName, Main, FromName, FromPid]),
     utils:print_nodes(NewPending, 
-                        io_lib:format("~p (~p) - NewPending: ", [LocalName, Self])),
+                        io_lib:format("~p (~p) - NewPending: ", [LocalName, Main])),
 
     % Remove my self from nodes received
-    FilteredNodes = [Node || {_, _NodeId, NodePid} = Node <- ReturnedNodes, NodePid =/= Self],
+    % log:debug("~p (~p): remove myself ~p from returned nodes", [LocalName, Main, self()]),
+    FilteredNodes = [Node || {_, _NodeId, NodePid} = Node <- ReturnedNodes, 
+        (NodePid =/= Main) andalso (NodePid =/= self())],
     % Update routing table
     NewBuckets = update_routing_table(FilteredNodes, LocalId, Buckets, K, LocalName, IdBitLength),
-    utils:print_buckets(LocalName, Self, NewBuckets),
+    utils:print_buckets(LocalName, Main, NewBuckets),
 
     % Update collected nodes
     NewNodesCollected = utils:order_unique(NodesCollected ++ ReturnedNodes, TargetID),
     utils:print_nodes(NewNodesCollected, io_lib:format("~p (~p) - nodes_lookup - NewNodesCollected: ", 
-        [LocalName, Self])),
+        [LocalName, Main])),
 
     NewState = State#{
         buckets => NewBuckets,
@@ -498,14 +516,15 @@ handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
     case checkCloserNodes(FilteredNodes, VisitedNodes, TargetID) of
         true ->
             % Continue with lookup of Alpha closer nodes not yet visited
-            log:debug("~p (~p): CONTINUE lookup - still some closer nodes", [LocalName, Self]),
+            log:debug("~p (~p): CONTINUE lookup - still some closer nodes", [LocalName, Main]),
             UpdatedState = nodes_lookup(TargetID, NewState, Alpha),
             case LookupMode of
                 republish -> republish_loop(UpdatedState);
+                refresh -> refresh_loop(UpdatedState);
                 _ -> node_loop(UpdatedState)
             end;
         false ->
-            log:debug("~p (~p): NO CLOSER NODES to lookup", [LocalName, Self]),
+            log:debug("~p (~p): NO CLOSER NODES to lookup", [LocalName, Main]),
 
             % Check if there are pending requests
             case length(NewPending) of
@@ -514,10 +533,11 @@ handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
                     case IsLastQuery of
                         false -> 
                             % Perform one last query for the K closest nodes not yet visited
-                            log:debug("~p (~p): LAST lookup for K nodes not visited", [LocalName, Self]),
+                            log:debug("~p (~p): LAST lookup for K nodes not visited", [LocalName, Main]),
                             UpdatedState = nodes_lookup(TargetID, NewState#{is_last_query => true}, K),
                             case LookupMode of
                                 republish -> republish_loop(UpdatedState);
+                                refresh -> refresh_loop(UpdatedState);
                                 _ -> node_loop(UpdatedState)
                             end;
                         true ->
@@ -525,16 +545,16 @@ handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
                     end;
                 _ ->
                     % There are still pending requests
-                    log:debug("~p (~p): CONTINUE - still some pending requests", [LocalName, Self]),
+                    log:debug("~p (~p): CONTINUE - still some pending requests", [LocalName, Main]),
                     % utils:print_nodes(NewPending, 
-                    %     io_lib:format("~p (~p) - NewPending: ", [LocalName, Self])),
+                    %     io_lib:format("~p (~p) - NewPending: ", [LocalName, Main])),
                     case LookupMode of
                         republish -> republish_loop(NewState);
+                        refresh -> refresh_loop(NewState);
                         _ -> node_loop(NewState)
                     end
             end
     end.
-
 
 
 nodes_lookup(TargetID, State, Alpha) ->
@@ -545,22 +565,18 @@ nodes_lookup(TargetID, State, Alpha) ->
     VisitedNodes = maps:get(visited_nodes, State),
     NodesCollected = maps:get(nodes_collected, State),
     LookupMode = maps:get(lookup_mode, State),
-    Main = maps:get(main_process, State, undefined),
     Hops = maps:get(num_hops, State, 0),
-
-    Self = case Main of
-        undefined -> self();
-        _ -> Main
-    end,
+    Main = maps:get(self, State),
+    Self = self(),
 
     ClosestNodes = select_closest_nodes(TargetID, Alpha, Buckets, NodesCollected, VisitedNodes, 
-        Self, LocalName, IdBitLength),
+        Main, LocalName, IdBitLength),
     utils:print_nodes(ClosestNodes, io_lib:format("~p (~p) - nodes_lookup - ClosestNodes: ", 
-        [LocalName, Self])),
+        [LocalName, Main])),
 
     NewState = case ClosestNodes of
         [] ->
-            log:debug("~p (~p): No more nodes to lookup", [LocalName, Self]),
+            log:debug("~p (~p): No more nodes to lookup", [LocalName, Main]),
 
             % Check if this was the last query and no pending requests
             IsLastQuery = maps:get(is_last_query, State, false),
@@ -582,7 +598,7 @@ nodes_lookup(TargetID, State, Alpha) ->
             end,
             NewVisitedNodes = VisitedNodes ++ ClosestNodes,
             utils:print_nodes(NewVisitedNodes, io_lib:format("~p (~p) - nodes_lookup - VisitedNodes: ", 
-                [LocalName, Self])),
+                [LocalName, Main])),
             NewHops = Hops + 1,
             State#{
                 visited_nodes => NewVisitedNodes,
@@ -601,11 +617,12 @@ select_closest_nodes(TargetID, Alpha, Buckets, NodesCollected, VisitedNodes, Sel
             ClosestFromBuckets = get_closest_from_buckets(Buckets, TargetID, IdBitLength, Alpha, [], 
                 LocalName),
             [Node || {_, _, NodePid} = Node <- ClosestFromBuckets, 
-             not lists:member(Node, VisitedNodes), NodePid =/= Self];
+             not lists:member(Node, VisitedNodes), (NodePid =/= Self) andalso (NodePid =/= self())];
         _ ->
             % Next lookups of Alpha closest nodes not yet visited
             NodesNotVisited = [Node || {_, _, NodePid} = Node <- NodesCollected, 
-                               not lists:member(Node, VisitedNodes), NodePid =/= Self],
+                               not lists:member(Node, VisitedNodes), 
+                               (NodePid =/= Self) andalso (NodePid =/= self())],
             lists:sublist(NodesNotVisited, Alpha)
     end.
 
@@ -615,15 +632,16 @@ select_closest_nodes(TargetID, Alpha, Buckets, NodesCollected, VisitedNodes, Sel
 %% Query the nodes and set timeouts. Returns updated State.
 %%
 find_query(Nodes, TargetID, Mode, State) ->
-    Self = self(),
     LocalName = maps:get(local_name, State),
     LocalId = maps:get(local_id, State),
     TimeoutInterval = maps:get(timeout_interval, State),
     TimeoutRefs0 = maps:get(timeout_refs, State),
     Pending0 = maps:get(pending_requests, State),
+    MainPid = maps:get(self, State),
+    Self = self(),
 
     log:debug("~p (~p) - find_query: sending ~p queries to ~p nodes", 
-        [LocalName, Self, Mode, length(Nodes)]),
+        [LocalName, MainPid, Mode, length(Nodes)]),
 
     % For each node, send the query, start a timeout timer and add to pending requests
     {TimeoutRefs, Pending} =
@@ -653,24 +671,20 @@ finalize_lookup(State) ->
     LookupMode = maps:get(lookup_mode, State),
     Requester = maps:get(requester, State),
     ValueToStore = maps:get(value_to_store, State, undefined),
-    Main = maps:get(main_process, State, undefined),
-    Self = case Main of
-        undefined -> self();
-        _ -> Main
-    end,
+    Main = maps:get(self, State),
 
     % return results and stop lookup process
-    log:debug("~p (~p): STOP LOOKUP - ZERO pending requests", [LocalName, Self]),
+    log:debug("~p (~p): STOP LOOKUP - ZERO pending requests", [LocalName, Main]),
     case LookupMode of
         find_value -> 
             log:debug("~p (~p): sending not_found to shell (~p)", 
-                [LocalName, Self, Requester]),
+                [LocalName, Main, Requester]),
             Requester ! {find_value_response, not_found},
             ResetState = reset_lookup_state(State),
             node_loop(ResetState);
         find_node  -> 
             log:debug("~p (~p): sending K closest to shell (~p)", 
-                [LocalName, Self, Requester]),
+                [LocalName, Main, Requester]),
             ClosestK = lists:sublist(NodesCollected, K),
             Requester ! {find_node_response, ClosestK},
             ResetState = reset_lookup_state(State),
@@ -681,7 +695,7 @@ finalize_lookup(State) ->
             AckNodes = store_value_at_nodes(ClosestK, ValueToStore, State),
 
             log:debug("~p (~p): sending store ACKS to shell (~p)", 
-                [LocalName, Self, Requester]),
+                [LocalName, Main, Requester]),
             Requester ! {store_response, ok, AckNodes},
             ResetState = reset_lookup_state(State),
             node_loop(ResetState);
@@ -691,17 +705,23 @@ finalize_lookup(State) ->
             AckNodes = store_value_at_nodes(ClosestK, ValueToStore, State),
 
             log:debug("~p (~p): sending republish ACKS to main process (~p)", 
-                [LocalName, Self, Main]),
+                [LocalName, Main, Main]),
             Main ! {republish_response, ok, {AckNodes, Buckets}},
             ResetState = reset_lookup_state(State),
-            republish_loop(ResetState)
+            republish_loop(ResetState);
+        refresh ->
+            log:debug("~p (~p): sending refresh ACK to main process (~p)", 
+                [LocalName, Main, Main]),
+            Main ! {refresh_response, ok, Buckets},
+            ResetState = reset_lookup_state(State),
+            refresh_loop(ResetState)
     end.
 
     
 handle_timeout(NodePid, State) ->
     LocalName = maps:get(local_name, State),
-    Self = self(),
-    log:debug("~p (~p): timeout from ~p", [LocalName, Self, NodePid]),
+    Main = maps:get(self, State),
+    log:debug("~p (~p): timeout from ~p", [LocalName, Main, NodePid]),
     TimeoutRefs = maps:get(timeout_refs, State),
     PendingRequests = maps:get(pending_requests, State),
 
@@ -713,24 +733,39 @@ handle_timeout(NodePid, State) ->
         pending_requests => NewPending
     },
 
+    Mode = maps:get(lookup_mode, NewState),
+
     % If lookup still going and no more pending requests -> STOP
     case maps:get(lookup_status, NewState) of
         in_progress ->
             case NewPending of
                 [] ->
-                    Mode = maps:get(lookup_mode, NewState),
-                    FromPid = maps:get(requester, NewState),
+                    Requester = maps:get(requester, NewState),
                     case Mode of
                         find_value ->
-                            FromPid ! {find_value_response, not_found};
+                            Requester ! {find_value_response, not_found};
                         find_node ->
                             Nodes = maps:get(nodes_collected, NewState),
-                            FromPid ! {find_node_response, Nodes}
+                            Requester ! {find_node_response, Nodes};
+                        republish ->
+                            republish_loop(NewState);
+                        refresh ->
+                            refresh_loop(NewState)
                     end,
                     node_loop(NewState#{lookup_status => done});
-                _ -> node_loop(NewState)
+                _ -> 
+                    case Mode of
+                        republish -> republish_loop(NewState);
+                        refresh -> refresh_loop(NewState);
+                        _ -> node_loop(NewState)
+                    end
             end;
-        _ -> node_loop(NewState)
+        _ -> 
+            case Mode of
+                republish -> republish_loop(NewState);
+                refresh -> refresh_loop(NewState);
+                _ -> node_loop(NewState)
+            end
     end.
 
 
@@ -786,27 +821,104 @@ handle_republish(State) ->
     ),
     node_loop(State#{storage => UpdatedStorage}).
 
-
 republish_loop(State) ->
     LocalName = maps:get(local_name, State),
     LookupStatus = maps:get(lookup_status, State),
-    Self = self(),
+    MainPid = maps:get(main_process, State),
 
     % If lookup has terminated, kill this lookup process
     case LookupStatus of
-        done -> exit(normale)
+        done -> exit(normal)
     end,
 
     receive
         {'FIND_NODE_RESPONSE', {nodes, ReturnedNodes}, TargetID, FromNode} ->
             {_FromId, FromPid} = FromNode,
-            log:debug("~p (~p): received a FIND_NODE_RESPONSE from ~p", [LocalName, Self, FromPid]),
+            log:debug("~p (~p) - REPUBLISH LOOP: received a FIND_NODE_RESPONSE from ~p", 
+                [LocalName, MainPid, FromPid]),
             handle_lookup_response(ReturnedNodes, TargetID, FromNode, State);
 
         % Message received when a pending request from a node goes in Timeout
         {timeout, NodePid} ->
-            log:debug("~p (~p): lookup TIMEOUT for the node ~p", [LocalName, Self, NodePid]),
+            log:debug("~p (~p) - REPUBLISH LOOP: lookup TIMEOUT for the node ~p", 
+                [LocalName, MainPid, NodePid]),
             handle_timeout(NodePid, State)
+    end.
+
+handle_refresh(State) ->
+    LocalId = maps:get(local_id, State),
+    Buckets = maps:get(buckets, State),
+    LocalName = maps:get(local_name, State),
+    IdByteLength = maps:get(id_byte_length, State, 20),
+    Alpha = maps:get(alpha_param, State),
+    ToRefresh = maps:get(to_refresh, State, 5),
+    Self = self(),
+
+    % Find N unique random bucket indexes
+    N = ToRefresh,
+    MaxIndex = length(Buckets),
+    RandomIndexes = get_unique_random_indexes(N, MaxIndex),
+
+    % Spawn a separate lookup process for each bucket to refresh
+    lists:foreach(fun(Index) ->
+        spawn(fun() -> 
+                % Generate random ID for selected bucket
+                log:info("~p (~p): REFRESHING bucket ~p", [LocalName, Self, Index]),
+                TargetId = utils:generate_random_id_in_bucket(LocalId, Index, IdByteLength),
+
+                % Initiate lookup loop
+                LookupState = State#{
+                    lookup_status => in_progress,
+                    lookup_mode => refresh,
+                    main_process => Self
+                },
+                NewState = nodes_lookup(TargetId, LookupState, Alpha),
+                refresh_loop(NewState)
+        end)
+    end, RandomIndexes),
+    node_loop(State).
+
+
+refresh_loop(State) ->
+    LocalName = maps:get(local_name, State),
+    LookupStatus = maps:get(lookup_status, State),
+    Main = maps:get(self, State),
+
+    case LookupStatus of
+        % If lookup has terminated, kill this lookup process
+        done -> exit(normal);
+        % otherwise
+        _ ->
+            receive
+                {'FIND_NODE_RESPONSE', {nodes, ReturnedNodes}, TargetID, FromNode} ->
+                    {FromName, _FromId, FromPid} = FromNode,
+                    log:debug("~p (~p) - REFRESH LOOP: received a FIND_NODE_RESPONSE from ~p (~p)", 
+                        [LocalName, Main, FromName, FromPid]),
+                    handle_lookup_response(ReturnedNodes, TargetID, FromNode, State);
+
+                % Message received when a pending request from a node goes in Timeout
+                {timeout, NodePid} ->
+                    log:debug("~p (~p) - REFRESH LOOP: lookup TIMEOUT for the node ~p", 
+                        [LocalName, Main, NodePid]),
+                    handle_timeout(NodePid, State);
+
+                trigger_final_response -> 
+                    log:debug("~p (~p): lookup finalization", [LocalName, Main]),
+                    finalize_lookup(State)
+            end
+    end.
+
+
+get_unique_random_indexes(N, Max) ->
+    get_unique_random_indexes(N, Max, sets:new()).
+
+get_unique_random_indexes(0, _, Acc) ->
+    sets:to_list(Acc);
+get_unique_random_indexes(N, Max, Acc) ->
+    R = rand:uniform(Max) - 1,
+    case sets:is_element(R, Acc) of
+        true -> get_unique_random_indexes(N, Max, Acc);
+        false -> get_unique_random_indexes(N - 1, Max, sets:add_element(R, Acc))
     end.
 
 
@@ -1017,43 +1129,6 @@ get_closest_from_buckets(Buckets, TargetID, CurrentBucketIndex, Remaining, Acc, 
 			NextBucketIndex = CurrentBucketIndex - 1,
 			get_closest_from_buckets(Buckets, TargetID,  NextBucketIndex, NewRemaining, NewAcc, LocalName)
     end.
-
-
-%%
-%% Performs a refresh procedure (nodes lookup) for N random buckets
-%%
-% refresh_buckets(0, _, State) ->
-%     State;
-% refresh_buckets(N, Indexes, State) ->
-%     LocalId = maps:get(local_id, State),
-%     Buckets = maps:get(buckets, State),
-%     LocalName = maps:get(local_name, State),
-%     IdByteLength = maps:get(id_byte_length, State, 20),
-%     MaxIndex = length(Buckets) - 1,
-
-%     Self = self(),
-
-%     % Find a random index which is not used yet
-%     Available = [I || I <- lists:seq(0, MaxIndex), not lists:member(I, Indexes)],
-%     case Available of
-%         [] ->
-%             log:warning("~p (~p): No more buckets available to refresh", [LocalName, Self]),
-%             State;
-%         _ ->
-%             % Select random bucket index
-%             RandomIndex = lists:nth(rand:uniform(length(Available)), Available),
-
-%             % Generate random ID for selected bucket
-%             TargetId = utils:generate_random_id_in_bucket(LocalId, RandomIndex-1, IdByteLength),
-
-%             % Esegui il lookup su quell’ID
-%             {nodes, ClosestNodes, NewBuckets} = nodes_lookup(TargetId, [], [], false, find_node, State),
-%             log:debug("~p (~p) - refresh_buckets index ~p. Lookup complete. Found ~p closest nodes", 
-%                 [LocalName, Self, RandomIndex, length(ClosestNodes)]),
-
-%             NewState = State#{buckets => NewBuckets},
-%             refresh_buckets(N - 1, [RandomIndex | Indexes], NewState)
-%     end.
 
 
 %%
