@@ -1,7 +1,9 @@
 -module(utils).
 -export([generate_node_id/1, order_unique/2, find_bucket_index/3, xor_distance/2, 
          calculate_key/2, generate_random_id_in_bucket/3, is_bootstrap/1, print_buckets/4,
-         print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3]).
+         print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3,
+         xor_distance_integer/2, print_nodes_with_distance/3, print_buckets_with_distance/4,
+         print_buckets_with_distance/5]).
 
 
 % Calculate XOR between binary IDs
@@ -12,6 +14,10 @@ xor_distance(A, B) when byte_size(A) =:= byte_size(B) ->
 xor_distance(A, B) ->
     error({invalid_binary_lengths, byte_size(A), byte_size(B)}).
 
+
+xor_distance_integer(A, B) ->
+    BinaryXor = xor_distance(A, B),
+    binary:decode_unsigned(BinaryXor).
 
 
 % Generate a random ID with specified number of bytes
@@ -52,7 +58,6 @@ generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
     BitPos = 7 - (BucketIndex rem 8), 
     
     % Converts the binaries to lists of bytes 
-    log:info("LOCAL ID = ~p", [LocalId]),
     LocalBytes = binary_to_list(LocalId),
     RandomBytes = binary_to_list(RandomId),
     
@@ -134,6 +139,37 @@ print_buckets_acc(LocalName, [H | T], Index, Acc) ->
     end.
 
 
+print_buckets_with_distance(LocalId, LocalName, Pid, Buckets) ->
+    print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, undefined).
+
+print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, TargetId) ->
+    Header = lists:flatten(io_lib:format("~n~n------ BUCKETS OF ~p (~p)------~n", [LocalName, Pid])),
+    Footer = "\n------ END BUCKETS ------\n",
+    Lines = print_buckets_with_distance_acc(LocalId, Buckets, 1, [], TargetId),
+    Body = string:join(lists:reverse(Lines), "\n"),
+    log_msg(debug, "~p (~p): ~s~s~s", [LocalName, Pid, Header, Body, Footer]).
+
+print_buckets_with_distance_acc(_, [], _, Acc, _) ->
+    Acc;
+print_buckets_with_distance_acc(LocalId, [H | T], Index, Acc, TargetId) ->
+    case H of
+        [] -> print_buckets_with_distance_acc(LocalId, T, Index + 1, Acc, TargetId);
+        _ ->
+            Nodes = [
+                case TargetId of
+                    undefined ->
+                        {Name, Pid, xor_distance_integer(NodeId, LocalId)};
+                    _ ->
+                        {Name, Pid, xor_distance_integer(NodeId, LocalId), xor_distance_integer(NodeId, TargetId)}
+                end
+                || {Name, NodeId, Pid} <- H
+            ],
+            Line = io_lib:format("--- ~p: ~p", [Index, Nodes]),
+            print_buckets_with_distance_acc(LocalId, T, Index + 1, [lists:flatten(Line) | Acc], TargetId)
+    end.
+
+
+
 %%
 %% Pretty prints the contents of the storage
 %%
@@ -158,12 +194,31 @@ format_line(_Key, Entry) ->
 %%
 %% Pretty prints the provided list of nodes of the form {NodeName, NodeId, NodePid}
 %%
-print_nodes(Nodes, Prefix) ->
-    print_nodes(Nodes, Prefix, debug).
+print_nodes(Nodes, Text) ->
+    print_nodes(Nodes, Text, debug).
 
-print_nodes(Nodes, StringPrefix, LogLevel) ->
+print_nodes(Nodes, Text, LogLevel) ->
     NodesMapped = lists:map(fun({NodeName, _, NodePid}) -> {NodeName, NodePid} end, Nodes),
-    log_msg(LogLevel, "~n~s~p~n", [StringPrefix, NodesMapped]).
+    log_msg(LogLevel, "~n~s~p~n", [Text, NodesMapped]).
+
+
+print_nodes_with_distance(Nodes, TargetId, Text) ->
+    NodesWithDist = lists:map(
+        fun({NodeName, NodeId, NodePid}) ->
+            Dist = xor_distance_integer(NodeId, TargetId),
+            {NodeName, NodePid, Dist}
+        end,
+        Nodes
+    ),
+    Sorted = lists:sort(fun({_, _, D1}, {_, _, D2}) -> D1 =< D2 end, NodesWithDist),
+    Lines = [io_lib:format("--- ~p ~p (distance: ~p)", [Name, Pid, Dist]) || {Name, Pid, Dist} <- Sorted],
+    Header = lists:flatten(io_lib:format("~n~n~s~n", [Text])),
+    Body = string:join([lists:flatten(Line) || Line <- Lines], "\n"),
+    Footer = "\n------ END NODES ------\n",
+    log_msg(debug, "~s~s~s", [Header, Body, Footer]).
+
+
+
 
 
 %% Dynamic log level

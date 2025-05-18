@@ -1,5 +1,5 @@
 -module(test).
--export([run_protocol_tests/0, measure_random_lookup/2, 
+-export([run_protocol_tests/0, measure_random_lookup/2, run_measurements_with_failure/0,
         prepare_network/2, measure_avg_random_lookup/3, run_measurements/0,
         print_buckets/1, print_storage/1, ping/2, store/2, find_value/2, find_node/2]).
 
@@ -12,7 +12,7 @@ run_protocol_tests() ->
     log:info("~n========== RUNNING PROTOCOL TESTS ==========~n"),
 
     % Start network with some options
-    IdByteLength = 5,
+    IdByteLength = 2,
 	CustomOpts = #{
 	    k_param => 20,
         alpha_param => 3,
@@ -28,16 +28,15 @@ run_protocol_tests() ->
     log:info("~n~n----- NODES initialization -----~n"),
 
     % Creation of one bootstrap node
-    IdLength = 5,
-    {ok, Bootstrap1} = node:start_bootstrap_node(bootstrap1, self(), IdLength),
+    {ok, Bootstrap1} = node:start_bootstrap_node(bootstrap1, self(), IdByteLength),
     wait_for_bootstrap_initialization(bootstrap1, Bootstrap1),
     BootstrapPids = [Bootstrap1],
 
     % Start a few regular nodes
-    {ok, Node1} = node:start_simple_node(nodo1, IdLength),
-    wait_for_node_initialization(Node1),
-    {ok, Node2} = node:start_simple_node(nodo2, IdLength),
-    wait_for_node_initialization(Node2),
+    {ok, Node1} = node:start_simple_node(nodo1, IdByteLength),
+    wait_for_node_initialization(Node1, false),
+    {ok, Node2} = node:start_simple_node(nodo2, IdByteLength),
+    wait_for_node_initialization(Node2, false),
     Nodes = [Node1, Node2],
 
     % Validation tests for Kademlia protocol
@@ -50,7 +49,7 @@ run_protocol_tests() ->
     FindValueTest = test_find_value(Node1, Key, Value),
 
     % Terminate the network
-    terminate_nodes(Nodes, SupPid),
+    terminate_nodes_and_sup(Nodes, SupPid),
 
     % % Print test results
     io:format("~n~n~n========== ALL TESTS COMPLETED ==========~n"),
@@ -87,28 +86,6 @@ print_test_result(Title, false) ->
     io:format("~n-------[FAIL]------- ~s~n", [Title]).
 
 
-wait_for_node_initialization({NodeName, _, NodePid}) ->
-    receive
-        {find_node_response, _ClosestK} -> 
-            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
-            ok
-    after 5000 -> 
-        log:info("~n~n~p (~p) FAILED TO INITIALIZE.~n", [NodeName, NodePid]),
-        exit(NodePid, kill),
-        timeout
-    end.
-
-wait_for_bootstrap_initialization(NodeName, NodePid) ->
-    receive
-        {find_node_response, _ClosestK} -> 
-            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
-            ok
-    after 5000 -> 
-        log:info("~n~n~p (~p) FAILED TO INITIALIZE.~n", [NodeName, NodePid]),
-        % exit(bootstrap_failed_init),
-        timeout
-    end.
-
 % Send a ping from Sender node to Receiver node to check if the latter is alive
 test_ping(SenderNode, ReceiverNode) ->
     log:info("~n~n----- Testing PING operation -----~n"),
@@ -127,7 +104,7 @@ test_store(Node, Value) ->
     log:info("~n~n----- Testing STORE operation -----~n"),
     Result = store(Node, Value),
     case Result of
-        {store_response, ok} -> 
+        {store_response, _Acks} -> 
             log:debug("Store complete in test_store~n"),
             true;
         _ -> 
@@ -196,7 +173,7 @@ store({_, _NodeId, NodePid}, Value) ->
     receive
         {store_response, ok, AckNodes} -> 
             utils:print_nodes(AckNodes, "Store ACKs: ", debug),
-            {store_response, ok}
+            {store_response, AckNodes}
     after 5000 -> timeout
     end.
 
@@ -220,65 +197,19 @@ find_value({_, _NodeId, NodePid}, Key) ->
     end.
 
 
-terminate_nodes(Nodes, SupPid) ->
-    log:info("~n~n========== TERMINATING ALL NODES ==========~n"),
-
-    % Terminate regular nodes
-    Pids = [begin
-        case is_process_alive(Pid) of
-            true ->
-                exit(Pid, kill),
-                log:debug("Terminated node: ~p", [Pid]),
-                Pid;
-            false -> Pid
-        end
-     end || {_, _, Pid} <- Nodes],
-     wait_until_dead(Pids),
-     log:debug("All regular nodes terminated"),
-
-    % Terminate supervisor and bootstrap nodes
-    log:debug("Terminating bootstrap nodes and supervisor: ~p", [SupPid]),
-    Ref = monitor(process, SupPid),
-    exit(SupPid, shutdown),
-    receive
-        {'DOWN', Ref, process, _Pid, _Reason} ->
-            log:debug("Supervisor terminated"),
-            ok
-    after 1000 ->
-            log:debug("Supervisor not terminated"),
-           timeout
-    end,
-
-    % Clean resources
-    ets:delete(bootstrap_nodes),
-    log:info("Network termination complete"),
-    ok.
-
-
-wait_until_dead([]) ->
-    ok;
-wait_until_dead(Pids) ->
-    Alive = [Pid || Pid <- Pids, is_process_alive(Pid)],
-    case Alive of
-        [] -> ok;
-        _ -> 
-            timer:sleep(100),
-            wait_until_dead(Alive)
-    end.
-
-
 prepare_network(BootstrapCount, NodeCount) ->
     log:start(),
 
     Options = #{
-        k_param => 20,
-        alpha_param => 3,
+        k_param => 3,
+        alpha_param => 2,
         id_byte_length => 2,
         republish_interval => 3600000,
         expiration_interval => 86400000,
         refresh_interval => 3600000,
         timeout_interval => 2000,
-        log_level => debug
+        log_level => info,
+        refresh => true
     },
     prepare_network(BootstrapCount, NodeCount, Options),
     ok.
@@ -294,22 +225,13 @@ prepare_network(BoostrapCount, NodeCount, Options) ->
     BootstrapNodes = create_bootstrap_nodes(BoostrapCount, IdByteLength),
 
     log:important("Creation of ~p NODES", [NodeCount]),
-    Nodes = create_nodes(NodeCount, IdByteLength),
+    Refresh = maps:get(refresh, Options, false),
+    log:important("REFRESH ACTIVE: ~p", [Refresh]),
+    Nodes = create_nodes(NodeCount, IdByteLength, Refresh),
 
-    log:important("All ~p NODES CREATED AND INITIALIZED", [length(Nodes)]),
-
-    % {MostPopularBefore, CountBefore} = get_node_with_most_bucket_entries(Nodes),
-
-    log:important("REFRESHING ~p NODES ----", [length(Nodes)]),
-    refresh_nodes(Nodes, 5),
-    log:important("REFRESH COMPLETE"),
-
-    % {MostPopularAfter, CountAfter} = get_node_with_most_bucket_entries(Nodes),
+    log:important("~p NODES CREATED AND INITIALIZED", [length(Nodes)]),
 
     log:important("NETWORK PREPARATION COMPLETE."),
-
-    % Select the most connected node in the network as a lookup test subject
-    {MostPopularNode, Count} = get_node_with_most_bucket_entries(Nodes),
 
     % Select random lookup node for lookup testing on random values
     RandomNodeIndex = rand:uniform(length(Nodes)),
@@ -318,48 +240,7 @@ prepare_network(BoostrapCount, NodeCount, Options) ->
     utils:print_nodes(Nodes, "REACHABLE NODES: ", important),
     utils:print_nodes([RandomNode], "RANDOM NODE: ", important),
 
-    utils:print_nodes([MostPopularNode], "MOST POPULAR NODE B: ", important),
-    log:important("Most populare node count = ~p", [Count]),
-
-    % utils:print_nodes([MostPopularBefore], "MOST POPULAR NODE BEFORE: ", important),
-    % log:info("Most populare node count BEFORE = ~p~n", [CountBefore]),
-
-    % utils:print_nodes([MostPopularAfter], "MOST POPULAR NODE AFTER: ", important),
-    % log:info("Most populare node count AFTER = ~p~n", [CountAfter]),
-
     {Nodes, BootstrapNodes, SupPid}.
-
-
-get_node_with_most_bucket_entries(Nodes) ->
-    Self = self(),
-    [NodePid ! {get_buckets_request, Self} || {_Name, _Id, NodePid} <- Nodes],
-    receive_buckets(Nodes, []).
-
-receive_buckets([], Acc) ->
-    % Trova il nodo con il massimo numero totale di entry nei bucket
-    case Acc of
-        [] -> {error, no_responses};
-        _ ->
-            {MaxNode, MaxCount} = lists:foldl(
-                fun({Node, Count}, {CurMaxNode, CurMaxCount}) ->
-                    case Count > CurMaxCount of
-                        true -> {Node, Count};
-                        false -> {CurMaxNode, CurMaxCount}
-                    end
-                end,
-                hd(Acc),
-                tl(Acc)
-            ),
-            {MaxNode, MaxCount}
-    end;
-receive_buckets([_ | Rest], Acc) ->
-    receive
-        {buckets_dump, Buckets, FromNode} ->
-            Count = lists:sum([length(B) || B <- Buckets]),
-            receive_buckets(Rest, [{FromNode, Count} | Acc])
-    after 1000 ->
-        receive_buckets(Rest, Acc)
-    end.
 
 
 run_measurements() ->
@@ -368,34 +249,175 @@ run_measurements() ->
     log:set_level_global(important),
     log:clean_console(),
 
-    % NodeCounts = [32, 64, 128, 256, 512, 1024],
-    NodeCounts = [8, 16, 32, 64, 128, 256, 512, 1024],
+    % Measure average lookup time wrt number of nodes
+    % NodeCounts = [8, 16, 32, 128, 256, 512, 1024, 2048, 4096],
+    % NodeCounts = [10, 100, 1000, 10000],
+    NodeCounts = [8, 16, 32],
     BootstrapCount = 5,
     LookupsPerRun = 100,
-    % NumTrialsPerNodeCount = 1,
 
     Results = lists:map(
         fun(NodeCount) ->
-            % {AvgTimes, AvgHops} = [measure_avg_random_lookup(LookupsPerRun, BootstrapCount, NodeCount)
-            %            || _ <- lists:seq(1, NumTrialsPerNodeCount)],
-            % AvgTrialsTimes = lists:sum(AvgTimes) / length(AvgTimes),
-            % AvgTrialsHops = lists:sum(AvgHops) / length(AvgHops),
-            % {NodeCount, AvgTrialsTimes, AvgTrialsHops}
+
             {AvgTimes, AvgHops} = measure_avg_random_lookup(LookupsPerRun, BootstrapCount, NodeCount),
             {NodeCount, AvgTimes, AvgHops}
         end,
         NodeCounts
     ),
+
     log:clean_console(),
-    log:important("~n~n----------- RESULTS -----------~n"),
+    
+    log:important("~n~n----------- RESULTS AVERAGE LOOKUP -----------~n"),
     [begin log:raw(important, "Node count: ~p, Avg lookup time: ~.2f ms, Avg hops: ~p", 
         [NodeCount, AvgTime, AvgHops]) end
      || {NodeCount, AvgTime, AvgHops} <- Results],
+
     ok.
 
 
+run_measurements_with_failure() ->
+    process_flag(trap_exit, true),
+    log:start(),
+    log:set_level_global(important),
+    log:clean_console(),
+
+    NodeCount = 500,
+    BootstrapCount = 5,
+    LookupsPerRun = 100,
+
+    % Measure average lookup time wrt to K closest nodes failure (up to K-1)
+    Results = measure_avg_random_lookup_with_failure(LookupsPerRun, BootstrapCount, NodeCount),
+
+    log:clean_console(),
+
+    log:important("~n~n----------- RESULTS AVERAGE LOOKUP WITH NODES FAILURE -----------~n"),
+    [begin 
+        case Status of
+            fail -> log:raw(important, "Failed count: ~p, LOOKUP FAILED", [FailedCount]);
+            _ ->
+                MissedCount = TotalAttempts - LookupsPerRun,
+                FailureRate = MissedCount / TotalAttempts * 100,
+                log:raw(important, "Failed count: ~p, Avg lookup time: ~.2f ms, Avg hops: ~p, Total attempts: ~p", 
+                [FailedCount, AvgTime, AvgHops, TotalAttempts]) 
+        end
+     end
+    || {FailedCount, AvgTime, AvgHops, TotalAttempts, Status} <- Results],
+
+    ok.
+
+
+measure_avg_random_lookup_with_failure(N, BootstrapCount, NodeCount) ->
+    % Initialize the network
+    IdByteLength = 2,
+    K = 20,
+    CustomOpts = #{
+        k_param => K,
+        alpha_param => 3,
+        id_byte_length => IdByteLength,
+        republish_interval => 360000000,
+        expiration_interval => 360000000,
+        refresh_interval => 360000000,
+        timeout_interval => 500,
+        log_level => important,
+        refresh => true
+    },
+    {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, NodeCount, CustomOpts),
+
+    % Save a random value in the K closest nodes
+    {KClosest, Key} = store_and_get_k_closest(Nodes, IdByteLength, K),
+    log:important("Found ~p nodes in measure_avg_random_lookup_with_failure", [length(KClosest)]),
+
+    % Perform measurements
+    Results = lists:map(
+        fun(FailedCount) ->
+            % Kill FailedCount nodes among the closest
+            utils:print_nodes(KClosest, "KClosest nodes: ", important),
+            log:important("Attempting to kill ~p nodes", [FailedCount]),
+            {ToKill, _ToKeep} = lists:split(FailedCount, KClosest),
+            terminate_nodes(ToKill),
+            utils:print_nodes(ToKill, "Nodes to kill: ", important),
+
+            % Remove killed nodes from lookup candidates
+            FilteredNodes = [Node || Node <- Nodes, not lists:member(Node, ToKill)],
+
+            % Perform N random succesfull lookups
+            log:important("~n~nINITIATING LOOKUP MEASUREMENTS with ~p FAILED NODES~n", [FailedCount]),
+            {SuccessfulTimes, SuccessfulHops, TotalAttempts, Status} = perform_measurements_with_failure(
+                N, FilteredNodes, Key, [], [], 0, IdByteLength, 0),
+
+            % Calculate average lookup time
+            Length = length(SuccessfulTimes),
+            case Length of 
+                0 -> {FailedCount, -1, -1, TotalAttempts};
+                _ -> 
+                    AvgTime = lists:sum(SuccessfulTimes) / Length,
+                    AvgHops = round(lists:sum(SuccessfulHops) / Length),
+                    log:important("~p Successful Lookup measurements (~p total attempts): ~p~n", 
+                            [length(SuccessfulTimes), TotalAttempts, SuccessfulTimes]),
+                    log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", [Length, AvgTime]),
+                    log:important("~nAverage number of hops (~p successful runs): ~p~n", [Length, AvgHops]),
+                    {FailedCount, AvgTime, AvgHops, TotalAttempts, Status}
+            end
+        end,
+        lists:seq(0, K-1)
+    ),
+
+    terminate_nodes_and_sup(Nodes, SupPid),
+
+    Results.
+
+
+% Repeats until it stores a random value on K closest nodes without bootstrap nodes
+store_and_get_k_closest(Nodes, IdByteLength, K) ->
+    RandomNodeIndex = rand:uniform(length(Nodes)),
+    RandomNode = lists:nth(RandomNodeIndex, Nodes),
+    RandomValue = rand:uniform(1000000000),
+    {store_response, AckNodes} = store(RandomNode, RandomValue),
+    Key = utils:calculate_key(RandomValue, IdByteLength),
+    case lists:any(fun is_bootstrap/1, AckNodes) of
+        true ->
+            log:important("Bootstrap node found in AckNodes, retrying..."),
+            store_and_get_k_closest(Nodes, IdByteLength, K);
+        false ->
+            {AckNodes, Key}
+    end.
+
+is_bootstrap({Name, _, _}) ->
+    NameStr = atom_to_list(Name),
+    string:prefix(NameStr, "bootstrap_") =/= nomatch.
+
+
+perform_measurements_with_failure(0, _nodes, _Key, AccTimes, AccHops, AccAttempts, _, _) ->
+    {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts, success};
+perform_measurements_with_failure(Remaining, Nodes, Key, AccTimes, AccHops, AccAttempts, IdByteLength, Failures) ->
+    case Failures >= 1000 of
+        true -> {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts, fail};
+        false ->
+            % Select random lookup node
+            RandIndex = rand:uniform(length(Nodes)),
+            RandLookupNode = lists:nth(RandIndex, Nodes),
+
+            % Perform measurement with lookup node
+            log:important("~n~n---- MEASUREMENT ~p / ~p ----~n", [length(AccTimes) + 1, 
+                Remaining + length(AccTimes)]),
+            {Time, Result} = measure_random_lookup(RandLookupNode, Key),
+            case Result of
+                {ok, found, Hops} ->
+                    % Successful lookup - add to results and continue
+                    perform_measurements_with_failure(Remaining - 1, Nodes, Key, [Time | AccTimes], 
+                        [Hops | AccHops], AccAttempts + 1, IdByteLength, Failures);
+                _ ->
+                    % Failed lookup - retry with same remaining count, increase number of failures
+                    log:important("Lookup failed, retrying... Failures: ~p", [Failures]),
+                    perform_measurements_with_failure(Remaining, Nodes, Key, AccTimes, AccHops,
+                        AccAttempts + 1, IdByteLength, Failures + 1)
+            end
+    end.
+
+
 measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
-    IdByteLength = 1,
+    % Initialize the network
+    IdByteLength = 2,
     CustomOpts = #{
         k_param => 10,
         alpha_param => 3,
@@ -403,60 +425,35 @@ measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
         republish_interval => 360000000,
         expiration_interval => 360000000,
         refresh_interval => 360000000,
-        timeout_interval => 2000,
-        log_level => important
+        timeout_interval => 1000,
+        log_level => important,
+        refresh => true
     },
-
     {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, NodeCount, CustomOpts),
 
     % Select random lookup node for lookup testing on random values
-    % RandomNodeIndex = rand:uniform(length(Nodes)),
-    % RandomLookupNode = lists:nth(RandomNodeIndex, Nodes),
+    RandomNodeIndex = rand:uniform(length(Nodes)),
+    RandomLookupNode = lists:nth(RandomNodeIndex, Nodes),
 
-    % Select the most connected node in the network as a lookup test subject
-    {MostPopularNode, _Count} = get_node_with_most_bucket_entries(Nodes),
-    
-    log:important("INITIATING LOOKUP MEASUREMENTS~n"),
-    {SuccessfulTimes, SuccessfulHops, TotalAttempts} = perform_measurements(MostPopularNode, N, 
+    % Perform measurements
+    log:important("~n~nINITIATING LOOKUP MEASUREMENTS with ~p NODES~n", [NodeCount]),
+    {SuccessfulTimes, SuccessfulHops, TotalAttempts} = perform_measurements(RandomLookupNode, N, 
         Nodes, [], [], 0, IdByteLength),
+
+    % Calculate average lookup time
+    Length = length(SuccessfulTimes),
+    AvgTime = lists:sum(SuccessfulTimes) / Length,
+    AvgHops = round(lists:sum(SuccessfulHops) / Length),
+
+    log:important("~p Successful Lookup measurements (~p total attempts): ~p~n", 
+                [length(SuccessfulTimes), TotalAttempts, SuccessfulTimes]),
+    log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", [Length, AvgTime]),
+    log:important("~nAverage number of hops (~p successful runs): ~p~n", [Length, AvgHops]),
+
+    % Terminate nodes for this iteration
+    terminate_nodes_and_sup(Nodes, SupPid),
     
-    Results = case SuccessfulTimes of
-        [] ->
-            log:important("Failed to complete any successful lookups after ~p total attempts~n", 
-                [TotalAttempts]),
-            {0, 0};
-        _ ->
-            % % Use truncated average to reduce outliers
-            % SortedTimes = lists:sort(SuccessfulTimes),
-            % SortedHops = lists:sort(SuccessfulHops),
-            % Length = length(SortedTimes),
-
-            % % Calculate elements to cut
-            % ToDrop = trunc(Length * 0.05),
-
-            % % Take only central part (90% of data)
-            % TruncatedTimes = lists:sublist(SortedTimes, ToDrop + 1, Length - 2 * ToDrop),
-            % TruncatedHops = lists:sublist(SortedHops, ToDrop + 1, Length - 2 * ToDrop),
-            % TruncatedLength = length(TruncatedTimes),
-            % AvgTime = lists:sum(TruncatedTimes) / TruncatedLength,
-            % AvgHops = round(lists:sum(SortedTimes) / TruncatedLength),
-
-            Length = length(SuccessfulTimes),
-            AvgTime = lists:sum(SuccessfulTimes) / Length,
-            AvgHops = round(lists:sum(SuccessfulHops) / Length),
-
-            log:important("~p Successful Lookup measurements (~p total attempts): ~p~n", 
-                     [length(SuccessfulTimes), TotalAttempts, SuccessfulTimes]),
-            % log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", [TruncatedLength, AvgTime]),
-            % log:important("~nAverage number of hops (~p successful runs): ~p~n", [TruncatedLength, AvgHops]),
-            log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", [Length, AvgTime]),
-            log:important("~nAverage number of hops (~p successful runs): ~p~n", [Length, AvgHops]),
-            {AvgTime, AvgHops}
-    end,
-
-    terminate_nodes(Nodes, SupPid),
-    
-    Results.
+    {AvgTime, AvgHops}.
 
 
 perform_measurements(_LookupNode, 0, _nodes, AccTimes, AccHops, AccAttempts, _) ->
@@ -470,8 +467,9 @@ perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops, AccAttempt
     % Generate random value and store it in the K closest nodes using random node
     RandomValue = rand:uniform(1000000000),
     StoreResult = store(RandomNode, RandomValue),
+
     case StoreResult of
-        {store_response, ok} -> 
+        {store_response, _Acks} -> 
             log:important("Store complete in perform_measurements~n"),
 
             % Perform measurement with lookup node
@@ -506,8 +504,8 @@ measure_random_lookup({_NodeName, _NodeId, NodePid}, TestKey) ->
                 {ok, found, Hops};
             {find_value_response, not_found} ->
                 {error, not_found}
-        after 1000 -> 
-            {error, timeout}
+        % after 100 -> 
+        %     {error, timeout}
         end
     end),
 
@@ -517,43 +515,41 @@ measure_random_lookup({_NodeName, _NodeId, NodePid}, TestKey) ->
     {TimeMS, Result}.
 
 
-create_nodes(N, IdByteLength) ->
-    create_nodes(1, N, [], IdByteLength).
+create_nodes(N, IdByteLength, Refresh) ->
+    create_nodes(1, N, [], IdByteLength, Refresh).
 
-create_nodes(I, N, Acc, _) when I > N ->
+create_nodes(I, N, Acc, _, _) when I > N ->
     lists:reverse(Acc);
-create_nodes(I, N, Acc, IdByteLength) ->
+create_nodes(I, N, Acc, IdByteLength, Refresh) ->
     Name = list_to_atom("node_" ++ integer_to_list(I)),
     case node:start_simple_node(Name, IdByteLength) of
         {ok, Node} ->
             timer:sleep(50),
-            Result = wait_for_node_initialization(Node),
+            Result = wait_for_node_initialization(Node, Refresh),
             case Result of
-                ok -> create_nodes(I + 1, N, [Node | Acc], IdByteLength);
-                _ -> create_nodes(I + 1, N, Acc, IdByteLength)
+                ok -> create_nodes(I + 1, N, [Node | Acc], IdByteLength, Refresh);
+                _ -> create_nodes(I + 1, N, Acc, IdByteLength, Refresh)
             end;
         _ ->
             log:error("Failed to create node ~p", [I]),
-            create_nodes(I + 1, N, Acc, IdByteLength)
+            create_nodes(I + 1, N, Acc, IdByteLength, Refresh)
     end.
 
 
-refresh_nodes(Nodes, ToRefresh) ->
-    Self = self(),
-    lists:foreach(fun(Node) ->
-        {_, _, Pid} = Node, 
-        Pid ! {refresh_buckets, ToRefresh, Self},
-        wait_for_refresh(Node) 
-    end, Nodes).
 
+refresh_node(Node) ->
+    Self = self(),
+    {_, _, Pid} = Node, 
+    Pid ! {refresh_buckets, Self},
+    wait_for_refresh(Node).
 
 wait_for_refresh({NodeName, _, NodePid}) ->
     receive
         {refresh_complete} -> 
-            log:info("~n~n~p (~p) REFRESHED SUCCESFULLY.~n", [NodeName, NodePid]),
+            log:important("~n~n~p (~p) REFRESHED SUCCESFULLY.~n", [NodeName, NodePid]),
             ok
     after 5000 -> 
-        log:info("~n~n~p (~p) FAILED TO REFRESH.~n", [NodeName, NodePid]),
+        log:important("~n~n~p (~p) FAILED TO REFRESH.~n", [NodeName, NodePid]),
         timeout
     end.
 
@@ -573,4 +569,85 @@ create_bootstrap_nodes(I, N, Acc, Self, IdByteLength) ->
         _ ->
             log:error("Failed to create bootstrap node ~p. Terminating.", [I]),
             exit(bootstrap_node_creation_failed)
+    end.
+
+
+terminate_nodes_and_sup(Nodes, SupPid) ->
+    log:info("~n~n========== TERMINATING ALL NODES ==========~n"),
+
+    % Terminate regular nodes
+    terminate_nodes(Nodes),
+     log:important("All regular nodes terminated"),
+
+    % Terminate supervisor and bootstrap nodes
+    log:important("Terminating bootstrap nodes and supervisor: ~p", [SupPid]),
+    Ref = monitor(process, SupPid),
+    exit(SupPid, shutdown),
+    receive
+        {'DOWN', Ref, process, _Pid, _Reason} ->
+            log:important("Supervisor terminated"),
+            ok
+    after 1000 ->
+            log:important("Supervisor not terminated"),
+           timeout
+    end,
+
+    % Clean resources
+    ets:delete(bootstrap_nodes),
+    log:info("Network termination complete"),
+    ok.
+
+
+terminate_nodes(Nodes) ->
+    log:info("~n~n========== TERMINATING ~p NODES ==========~n", [length(Nodes)]),
+
+    % Terminate regular nodes
+    Pids = [begin
+        case is_process_alive(Pid) of
+            true ->
+                exit(Pid, kill),
+                log:important("Terminated node: ~p", [Pid]),
+                Pid;
+            false -> Pid
+        end
+     end || {_, _, Pid} <- Nodes],
+     wait_until_dead(Pids).
+
+
+wait_until_dead([]) ->
+    ok;
+wait_until_dead(Pids) ->
+    Alive = [Pid || Pid <- Pids, is_process_alive(Pid)],
+    case Alive of
+        [] -> ok;
+        _ -> 
+            timer:sleep(100),
+            wait_until_dead(Alive)
+    end.
+
+
+wait_for_node_initialization(Node, Refresh) ->
+    {NodeName, _, NodePid} = Node,
+    receive
+        {find_node_response, _ClosestK} -> 
+            log:important("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
+            case Refresh of 
+                false -> ok;
+                _ -> refresh_node(Node)
+            end
+    after 5000 -> 
+        log:important("~n~n~p (~p) FAILED TO INITIALIZE.~n", [NodeName, NodePid]),
+        exit(NodePid, kill),
+        timeout
+    end.
+
+wait_for_bootstrap_initialization(NodeName, NodePid) ->
+    receive
+        {find_node_response, _ClosestK} -> 
+            log:important("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
+            ok
+    after 5000 -> 
+        log:important("~n~n~p (~p) FAILED TO INITIALIZE.~n", [NodeName, NodePid]),
+        % exit(bootstrap_failed_init),
+        timeout
     end.
