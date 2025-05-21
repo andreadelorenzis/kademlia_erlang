@@ -2,8 +2,8 @@
 -export([generate_node_id/1, order_unique/2, find_bucket_index/3, xor_distance/2, 
          calculate_key/2, generate_random_id_in_bucket/3, is_bootstrap/1, print_buckets/4,
          print_buckets/3, print_storage/3, print_nodes/2, print_storage/4, print_nodes/3,
-         xor_distance_integer/2, print_nodes_with_distance/3, print_buckets_with_distance/4,
-         print_buckets_with_distance/5]).
+         xor_distance_integer/2, print_nodes_with_distance/3, print_buckets_with_distance/5,
+         print_buckets_with_distance/6]).
 
 
 % Calculate XOR between binary IDs
@@ -139,15 +139,15 @@ print_buckets_acc(LocalName, [H | T], Index, Acc) ->
     end.
 
 
-print_buckets_with_distance(LocalId, LocalName, Pid, Buckets) ->
-    print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, undefined).
+print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, LogLevel) ->
+    print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, undefined, LogLevel).
 
-print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, TargetId) ->
+print_buckets_with_distance(LocalId, LocalName, Pid, Buckets, TargetId, LogLevel) ->
     Header = lists:flatten(io_lib:format("~n~n------ BUCKETS OF ~p (~p)------~n", [LocalName, Pid])),
     Footer = "\n------ END BUCKETS ------\n",
     Lines = print_buckets_with_distance_acc(LocalId, Buckets, 1, [], TargetId),
     Body = string:join(lists:reverse(Lines), "\n"),
-    log_msg(debug, "~p (~p): ~s~s~s", [LocalName, Pid, Header, Body, Footer]).
+    log_msg(LogLevel, "~p (~p): ~s~s~s", [LocalName, Pid, Header, Body, Footer]).
 
 print_buckets_with_distance_acc(_, [], _, Acc, _) ->
     Acc;
@@ -185,7 +185,7 @@ print_storage(LocalName, Pid, Storage, LogLevel) ->
     log_msg(LogLevel, "~p (~p): ~s~s~s", [LocalName, Pid, Header, lists:flatten(Text), Footer]).
 
 format_line(_Key, Entry) ->
-    {Value, Expiry, RepublishTime, {_OwnerID, OwnerPid}} = Entry,
+    {Value, Expiry, RepublishTime, {_, _, OwnerPid}} = Entry,
     Line = io_lib:format("--- ~p (value), ~p (expiry), ~p (republish), ~p (owner)", 
         [Value, Expiry, RepublishTime, OwnerPid]),
     lists:flatten(Line).

@@ -1,9 +1,9 @@
 -module(bootstrap_node).
--export([start_link/3]).
+-export([start_link/2]).
 
 
-start_link(Name, ShellPid, IdLength) ->
-	Pid = spawn_link(fun() -> init(Name, ShellPid, IdLength) end),
+start_link(Name, ShellPid) ->
+	Pid = spawn_link(fun() -> init(Name, ShellPid) end),
 	log:info("Spawned bootstrap node: ~p~n", [{Name, Pid}]),
 	{ok, Pid}.
 
@@ -11,8 +11,13 @@ start_link(Name, ShellPid, IdLength) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
-init(Name, ShellPid, IdLength) ->
-	ID = utils:generate_node_id(IdLength),
+init(Name, ShellPid) ->
+	% Get ID length from global options
+	[{global_options, NetworkOpts}] = ets:lookup(network_options, 
+											global_options),
+	IdByteLength = maps:get(id_byte_length, NetworkOpts, 20),
+
+	ID = utils:generate_node_id(IdByteLength),
 
 	% Save the bootstrap info in an ETS table
 	ets:insert(bootstrap_nodes, {Name, ID, self()}),

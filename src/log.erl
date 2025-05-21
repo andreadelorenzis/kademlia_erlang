@@ -31,7 +31,7 @@ set_level(Level) ->
     case level(Level) of
         {ok, _} ->
             put(?LOG_LEVEL_KEY, Level),
-            io:format("Log level is now: ~p~n", [get(?LOG_LEVEL_KEY)]);
+            io:format("Log level set with: ~p~n", [get(?LOG_LEVEL_KEY)]);
         {error, unknown_level} ->
             io:format("Invalid log level: ~p (keeping current level: ~p)~n", 
                      [Level, get(?LOG_LEVEL_KEY)])
@@ -41,6 +41,7 @@ set_level_global(Level) ->
     case level(Level) of
         {ok, _} ->
             persistent_term:put(?LOG_LEVEL_KEY, Level),
+            io:format("Log level set with: ~p~n", [Level]),
             ok;
         _ ->
             {error, invalid_level}
