@@ -7,7 +7,6 @@
 start_link() ->
     supervisor:start_link({global, ?MODULE}, ?MODULE, []).
 
-
 init([]) ->
     RestartStrategy = one_for_one,
     MaxRestarts = 1,

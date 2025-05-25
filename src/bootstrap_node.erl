@@ -7,10 +7,6 @@ start_link(Name, ShellPid) ->
 	log:info("Spawned bootstrap node: ~p~n", [{Name, Pid}]),
 	{ok, Pid}.
 
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-
 init(Name, ShellPid) ->
 	% Get ID length from global options
 	[{global_options, NetworkOpts}] = ets:lookup(network_options, 

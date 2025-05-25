@@ -14,22 +14,28 @@
          run_join_measurements/0]).
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PUBLIC FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Creates a network with a given number of nodes and bootstrap nodes and
+%% some predefined options.
 prepare_network(BootstrapCount, NodeCount) ->
     log:start(),
     Options = #{
         k_param => 10,
         alpha_param => 2,
         id_byte_length => 2,
-        republish_interval => 15000,
+        republish_interval => 30000,
         expiration_interval => 86400000,
         refresh_interval => 3600000,
         timeout_interval => 2000,
-        log_level => debug,
+        log_level => important,
         refresh => true
     },
     prepare_network(BootstrapCount, NodeCount, Options),
     ok.
 
+
+%% Sends a PING from SenderPid to ReceiverPid.
 ping(SenderPid, ReceiverPid) ->
     SenderPid ! {'ping_request', ReceiverPid, self()},
     receive
@@ -39,6 +45,8 @@ ping(SenderPid, ReceiverPid) ->
         dead
     end.    
 
+
+%% Tells NodePid to store Value on the K closest nodes.
 store(NodePid, Value) ->
     NodePid ! {store_request, Value, self()},
     receive
@@ -48,6 +56,8 @@ store(NodePid, Value) ->
     after 5000 -> timeout
     end.
 
+
+%% Tells NodePid to find the K closest nodes to ID.
 find_node(NodePid, ID) ->
     NodePid ! {find_node_request, ID, self()},
     receive
@@ -57,6 +67,8 @@ find_node(NodePid, ID) ->
     after 5000 -> timeout
     end.
 
+
+%% Tells NodePid to find the value corresponding to Key.
 find_value(NodePid, Key) ->
     NodePid ! {find_value_request, Key, self()},
     receive
@@ -67,12 +79,16 @@ find_value(NodePid, Key) ->
     after 2000 -> timeout
     end.
 
+
+%% Refreshes the buckets of Node.
 refresh_node(Node) ->
     Self = self(),
     {_, _, Pid} = Node, 
     Pid ! {refresh_buckets, Self},
     wait_for_refresh(Node).
 
+
+%% Prints the buckets of NodePid.
 print_buckets(NodePid) ->
     NodePid ! {get_buckets_request, self()},
     receive
@@ -82,9 +98,12 @@ print_buckets(NodePid) ->
         log:error("Timeout getting buckets for ~p", [NodePid])
     end.
 
+
+%% Prints the buckets of Node with distance from its ID.
 print_buckets_with_distance(Node) ->
     print_buckets_with_distance(Node, undefined).
 
+%% Prints the buckets of Node with distance from its ID and TargetID.
 print_buckets_with_distance(Node, TargetID) ->
     {NodeName, NodeId, NodePid} = Node,
     NodePid ! {get_buckets_request, self()},
@@ -92,14 +111,18 @@ print_buckets_with_distance(Node, TargetID) ->
         {buckets_dump, Buckets, _} ->
             case TargetID of
                 undefined ->
-                    utils:print_buckets_with_distance(NodeId, NodeName, NodePid, Buckets, important);
+                    utils:print_buckets_with_distance(NodeId, NodeName, 
+                        NodePid, Buckets, important);
                 _ ->
-                    utils:print_buckets_with_distance(NodeId, NodeName, NodePid, Buckets, TargetID, important)
+                    utils:print_buckets_with_distance(NodeId, NodeName, 
+                        NodePid, Buckets, TargetID, important)
             end
     after 5000 ->
         log:error("Timeout getting buckets for ~p", [NodePid])
     end.
 
+
+%% Prints the full storage of NodePid.
 print_storage(NodePid) ->
     NodePid ! {get_storage_request, self()},
     receive
@@ -109,6 +132,8 @@ print_storage(NodePid) ->
         log:error("Timeout getting storage for ~p", [NodePid])
     end.
 
+
+%% Runs a simulation to measure average lookup time.
 run_lookup_measurements() ->
     process_flag(trap_exit, true),
     log:start(),
@@ -123,7 +148,8 @@ run_lookup_measurements() ->
     Results = lists:map(
         fun(NodeCount) ->
 
-            {AvgTimes, AvgHops} = measure_avg_random_lookup(LookupsPerRun, BootstrapCount, NodeCount),
+            {AvgTimes, AvgHops} = measure_avg_random_lookup(LookupsPerRun, 
+                BootstrapCount, NodeCount),
             {NodeCount, AvgTimes, AvgHops}
         end,
         NodeCounts
@@ -138,6 +164,9 @@ run_lookup_measurements() ->
 
     ok.
 
+
+%% Runs a simulation to measure average lookup time and node failure rate 
+%% with up to K-1 failed nodes.
 run_measurements_with_failure() ->
     process_flag(trap_exit, true),
     log:start(),
@@ -148,14 +177,16 @@ run_measurements_with_failure() ->
     NodeCount = 500,
     BootstrapCount = 5,
     LookupsPerRun = 100,
-    Results = measure_avg_random_lookup_with_failure(LookupsPerRun, BootstrapCount, NodeCount),
+    Results = measure_avg_random_lookup_with_failure(LookupsPerRun, 
+        BootstrapCount, NodeCount),
 
     % Print final results
     log:clean_console(),
     log:important("~n~n----------- RESULTS AVERAGE LOOKUP WITH NODES FAILURE -----------~n"),
     [begin 
         case Status of
-            fail -> log:raw(important, "Failed count: ~p, LOOKUP FAILED", [FailedCount]);
+            fail -> log:raw(important, "Failed count: ~p, LOOKUP FAILED", 
+                [FailedCount]);
             _ ->
                 log:raw(important, "Failed count: ~p, Avg lookup time: ~.2f ms, Avg hops: ~p, Total attempts: ~p", 
                 [FailedCount, AvgTime, AvgHops, TotalAttempts]) 
@@ -165,6 +196,8 @@ run_measurements_with_failure() ->
 
     ok.
 
+
+%% Runs a simulation to measure average join time.
 run_join_measurements() ->
     process_flag(trap_exit, true),
     log:start(),
@@ -180,7 +213,8 @@ run_join_measurements() ->
     Results = lists:map(
         fun(NodeCount) ->
             log:important("~n~n----------- MEASURING JOIN TIME FOR ~p NODES -----------~n", [NodeCount]),
-            AvgJoinTime = measure_avg_join_time(NodeCount, BootstrapCount, JoinsPerConfiguration),
+            AvgJoinTime = measure_avg_join_time(NodeCount, BootstrapCount, 
+                JoinsPerConfiguration),
             {NodeCount, AvgJoinTime}
         end,
         NodeCounts
@@ -190,14 +224,15 @@ run_join_measurements() ->
     log:clean_console(),
     log:important("~n~n----------- RESULTS JOIN TIME MEASUREMENTS -----------~n"),
     [begin 
-        log:raw(important, "Network size: ~p nodes, Avg join time: ~.2f ms", [NodeCount, AvgJoinTime]) 
+        log:raw(important, "Network size: ~p nodes, Avg join time: ~.2f ms", 
+            [NodeCount, AvgJoinTime]) 
      end
      || {NodeCount, AvgJoinTime} <- Results],
 
     ok.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 prepare_network(BoostrapCount, NodeCount, Options) ->
     log:info("Starting the network with ~p BOOTSTRAP nodes ----", [BoostrapCount]),
@@ -241,11 +276,13 @@ measure_avg_random_lookup_with_failure(N, BootstrapCount, NodeCount) ->
         log_level => important,
         refresh => true
     },
-    {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, NodeCount, CustomOpts),
+    {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, 
+        NodeCount, CustomOpts),
 
     % Save a random value in the K closest nodes
     {KClosest, Key} = store_and_get_k_closest(Nodes, IdByteLength, K),
-    log:important("Found ~p nodes in measure_avg_random_lookup_with_failure", [length(KClosest)]),
+    log:important("Found ~p nodes in measure_avg_random_lookup_with_failure",
+         [length(KClosest)]),
 
     % Perform measurements
     Results = lists:map(
@@ -287,14 +324,16 @@ measure_avg_random_lookup_with_failure(N, BootstrapCount, NodeCount) ->
     Results.
 
 
-% Repeats until it stores a random value on K closest nodes without bootstrap nodes
 store_and_get_k_closest(Nodes, IdByteLength, K) ->
     RandomNodeIndex = rand:uniform(length(Nodes)),
     {_, _, RandomPid} = lists:nth(RandomNodeIndex, Nodes),
     RandomValue = rand:uniform(1000000000),
     {store_response, AckNodes} = store(RandomPid, RandomValue),
     Key = utils:calculate_key(RandomValue, IdByteLength),
-    case lists:any(fun is_bootstrap/1, AckNodes) of
+    IsBootstrap = lists:any(
+        fun({NodeName, _, _}) -> utils:is_bootstrap(NodeName) 
+    end, AckNodes),
+    case IsBootstrap of
         true ->
             log:important("Bootstrap node found in AckNodes, retrying..."),
             store_and_get_k_closest(Nodes, IdByteLength, K);
@@ -302,37 +341,40 @@ store_and_get_k_closest(Nodes, IdByteLength, K) ->
             {AckNodes, Key}
     end.
 
-is_bootstrap({Name, _, _}) ->
-    NameStr = atom_to_list(Name),
-    string:prefix(NameStr, "bootstrap_") =/= nomatch.
 
-
-perform_measurements_with_failure(0, _nodes, _Key, AccTimes, AccHops, AccAttempts, _, _) ->
+perform_measurements_with_failure(0, _nodes, _Key, AccTimes, AccHops, 
+        AccAttempts, _, _) ->
     {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts, success};
-perform_measurements_with_failure(Remaining, Nodes, Key, AccTimes, AccHops, AccAttempts, IdByteLength, Failures) ->
+perform_measurements_with_failure(Remaining, Nodes, Key, AccTimes, AccHops, 
+        AccAttempts, IdByteLength, Failures) ->
     case Failures >= 1000 of
-        true -> {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts, fail};
+        true -> 
+            {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts, fail};
         false ->
             % Select random lookup node
             RandIndex = rand:uniform(length(Nodes)),
             RandLookupNode = lists:nth(RandIndex, Nodes),
 
             % Perform measurement with lookup node
-            log:important("~n~n---- MEASUREMENT ~p / ~p ----~n", [length(AccTimes) + 1, 
-                Remaining + length(AccTimes)]),
+            log:important("~n~n---- MEASUREMENT ~p / ~p ----~n", 
+                [length(AccTimes) + 1, Remaining + length(AccTimes)]),
             {Time, Result} = measure_random_lookup(RandLookupNode, Key),
             case Result of
                 {ok, found, Hops} ->
                     % Successful lookup - add to results and continue
-                    perform_measurements_with_failure(Remaining - 1, Nodes, Key, [Time | AccTimes], 
-                        [Hops | AccHops], AccAttempts + 1, IdByteLength, Failures);
+                    perform_measurements_with_failure(Remaining - 1, Nodes, Key, 
+                        [Time | AccTimes], [Hops | AccHops], 
+                        AccAttempts + 1, IdByteLength, Failures);
                 _ ->
-                    % Failed lookup - retry with same remaining count, increase number of failures
-                    log:important("Lookup failed, retrying... Failures: ~p", [Failures]),
-                    perform_measurements_with_failure(Remaining, Nodes, Key, AccTimes, AccHops,
+                    % Failed lookup - retry with same remaining count
+                    log:important("Lookup failed, retrying... Failures: ~p", 
+                        [Failures]),
+                    perform_measurements_with_failure(Remaining, Nodes, Key, 
+                        AccTimes, AccHops,
                         AccAttempts + 1, IdByteLength, Failures + 1)
             end
     end.
+
 
 measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
     % Initialize the network
@@ -348,14 +390,16 @@ measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
         log_level => important,
         refresh => true
     },
-    {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, NodeCount, CustomOpts),
+    {Nodes, _BootstrapNodes, SupPid} = prepare_network(BootstrapCount, 
+        NodeCount, CustomOpts),
 
     % Select random lookup node for lookup testing on random values
     RandomNodeIndex = rand:uniform(length(Nodes)),
     RandomLookupNode = lists:nth(RandomNodeIndex, Nodes),
 
     % Perform measurements
-    log:important("~n~nINITIATING LOOKUP MEASUREMENTS with ~p NODES~n", [NodeCount]),
+    log:important("~n~nINITIATING LOOKUP MEASUREMENTS with ~p NODES~n", 
+        [NodeCount]),
     {SuccessfulTimes, SuccessfulHops, TotalAttempts} = perform_measurements(RandomLookupNode, N, 
         Nodes, [], [], 0, IdByteLength),
 
@@ -366,8 +410,10 @@ measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
 
     log:important("~p Successful Lookup measurements (~p total attempts): ~p~n", 
                 [length(SuccessfulTimes), TotalAttempts, SuccessfulTimes]),
-    log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", [Length, AvgTime]),
-    log:important("~nAverage number of hops (~p successful runs): ~p~n", [Length, AvgHops]),
+    log:important("~nAverage lookup time (~p successful runs): ~.2f ms~n", 
+        [Length, AvgTime]),
+    log:important("~nAverage number of hops (~p successful runs): ~p~n", 
+        [Length, AvgHops]),
 
     % Terminate nodes for this iteration
     terminate_nodes_and_sup(Nodes, SupPid),
@@ -375,9 +421,11 @@ measure_avg_random_lookup(N, BootstrapCount, NodeCount) ->
     {AvgTime, AvgHops}.
 
 
-perform_measurements(_LookupNode, 0, _nodes, AccTimes, AccHops, AccAttempts, _) ->
+perform_measurements(_LookupNode, 0, _nodes, AccTimes, AccHops, 
+        AccAttempts, _) ->
     {lists:reverse(AccTimes), lists:reverse(AccHops), AccAttempts};
-perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops, AccAttempts, IdByteLength) ->
+perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops, 
+        AccAttempts, IdByteLength) ->
 
     % Select a random node and random value for this attempt
     RandomNodeIndex = rand:uniform(length(Nodes)),
@@ -392,27 +440,29 @@ perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops, AccAttempt
             log:important("Store complete in perform_measurements~n"),
 
             % Perform measurement with lookup node
-            log:important("~n~n---- MEASUREMENT ~p / ~p ----~n", [length(AccTimes) + 1, 
-                Remaining + length(AccTimes)]),
+            log:important("~n~n---- MEASUREMENT ~p / ~p ----~n", 
+                [length(AccTimes) + 1, Remaining + length(AccTimes)]),
             TestKey = utils:calculate_key(RandomValue, IdByteLength),
             {Time, Result} = measure_random_lookup(LookupNode, TestKey),
             
             case Result of
                 {ok, found, Hops} ->
                     % Successful lookup - add to results and continue
-                    perform_measurements(LookupNode, Remaining - 1, Nodes, [Time | AccTimes], 
+                    perform_measurements(LookupNode, Remaining - 1, Nodes, 
+                        [Time | AccTimes], 
                         [Hops | AccHops], AccAttempts + 1, IdByteLength);
                 _ ->
                     % Failed lookup - retry with same remaining count
                     log:important("Lookup failed, retrying..."),
-                    perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops,
-                        AccAttempts + 1, IdByteLength)
+                    perform_measurements(LookupNode, Remaining, Nodes, 
+                        AccTimes, AccHops, AccAttempts + 1, IdByteLength)
             end;
         _ -> 
             % Failed to store measurement
-            perform_measurements(LookupNode, Remaining, Nodes, AccTimes, AccHops,
-                AccAttempts + 1, IdByteLength)
+            perform_measurements(LookupNode, Remaining, Nodes, AccTimes, 
+                AccHops, AccAttempts + 1, IdByteLength)
     end.
+
 
 measure_random_lookup({_NodeName, _NodeId, NodePid}, TestKey) ->
     {Time, Result} = timer:tc(fun() -> 
@@ -434,7 +484,6 @@ measure_random_lookup({_NodeName, _NodeId, NodePid}, TestKey) ->
 
 
 measure_avg_join_time(NodeCount, BootstrapCount, JoinsPerConfiguration) ->
-    % Initialize the network
     IdByteLength = 2,
     CustomOpts = #{
         k_param => 20,
@@ -447,12 +496,14 @@ measure_avg_join_time(NodeCount, BootstrapCount, JoinsPerConfiguration) ->
         log_level => important,
         refresh => true
     },
-    {BaseNodes, BootstrapNodes, SupPid} = prepare_network(BootstrapCount, NodeCount, CustomOpts),
+    {BaseNodes, BootstrapNodes, SupPid} = prepare_network(BootstrapCount, 
+        NodeCount, CustomOpts),
     log:important("Base network with ~p nodes prepared", [NodeCount]),
     
     % Measure join time for new nodes
     Refresh = maps:get(refresh, CustomOpts, false),
-    JoinTimes = measure_node_joins(JoinsPerConfiguration, BaseNodes, IdByteLength, [], Refresh),
+    JoinTimes = measure_node_joins(JoinsPerConfiguration, BaseNodes, 
+        IdByteLength, [], Refresh),
     
     % Calculate average join time
     AvgJoinTime = lists:sum(JoinTimes) / length(JoinTimes),
@@ -496,11 +547,13 @@ measure_node_joins(Remaining, BaseNodes, IdByteLength, AccTimes, Refresh) ->
     case JoinResult of
         ok ->
             % Successful join, continue with next measurement
-            measure_node_joins(Remaining - 1, BaseNodes, IdByteLength, [JoinTimeMs | AccTimes], Refresh);
+            measure_node_joins(Remaining - 1, BaseNodes, IdByteLength, 
+                [JoinTimeMs | AccTimes], Refresh);
         _ ->
             % Failed join, retry with same remaining count
             log:important("Join failed, retrying..."),
-            measure_node_joins(Remaining, BaseNodes, IdByteLength, AccTimes, Refresh)
+            measure_node_joins(Remaining, BaseNodes, IdByteLength, AccTimes, 
+                Refresh)
     end.
 
 
@@ -524,13 +577,16 @@ create_nodes(I, N, Acc, Refresh) ->
             create_nodes(I + 1, N, Acc, Refresh)
     end.
 
+
 wait_for_refresh({NodeName, _, NodePid}) ->
     receive
         {refresh_complete} -> 
-            log:important("~n~n~p (~p) REFRESHED SUCCESFULLY.~n", [NodeName, NodePid]),
+            log:important("~n~n~p (~p) REFRESHED SUCCESFULLY.~n", [NodeName, 
+                NodePid]),
             ok
     after 5000 -> 
-        log:important("~n~n~p (~p) FAILED TO REFRESH.~n", [NodeName, NodePid]),
+        log:important("~n~n~p (~p) FAILED TO REFRESH.~n", [NodeName,
+             NodePid]),
         timeout
     end.
 
@@ -580,7 +636,8 @@ terminate_nodes_and_sup(Nodes, SupPid) ->
 
 
 terminate_nodes(Nodes) ->
-    log:info("~n~n========== TERMINATING ~p NODES ==========~n", [length(Nodes)]),
+    log:info("~n~n========== TERMINATING ~p NODES ==========~n", 
+        [length(Nodes)]),
 
     % Terminate regular nodes
     Pids = [begin
@@ -611,7 +668,8 @@ wait_for_node_initialization(Node, Refresh) ->
     {NodeName, _, NodePid} = Node,
     receive
         {find_node_response, _ClosestK} -> 
-            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
+            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", 
+                [NodeName, NodePid]),
             case Refresh of 
                 false -> ok;
                 _ -> refresh_node(Node)
@@ -622,10 +680,12 @@ wait_for_node_initialization(Node, Refresh) ->
         timeout
     end.
 
+
 wait_for_bootstrap_initialization(NodeName, NodePid) ->
     receive
         {find_node_response, _ClosestK} -> 
-            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, NodePid]),
+            log:info("~n~n~p (~p) INITIALIZED SUCCESFULLY.~n", [NodeName, 
+                NodePid]),
             ok
     after 5000 -> 
         log:info("~n~n~p (~p) FAILED TO INITIALIZE.~n", [NodeName, NodePid]),

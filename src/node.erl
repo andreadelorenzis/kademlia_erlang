@@ -1,32 +1,27 @@
 -module(node).
 -export([start_network/0, start_network/1, start_simple_node/1, 
-				 start_bootstrap_node/2, init_node/4, choose_bootstrap/1]).
+		 start_bootstrap_node/2, init_node/4, choose_bootstrap/1]).
 
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PUBLIC FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%% PUBLIC FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-
-%%
 %% Starts the Kademlia network with predefined options.
-%%
 start_network() ->
 	DefaultOptions = #{
 		k_param => 20,
 		alpha_param => 3,
-		id_byte_length => 5, % 5 bytes (40 bits)
-		republish_interval => 3600000, % 1 hour
-		expiration_interval => 86400000, % 24 hours
-		refresh_interval => 3600000, % 1 hour
-		check_expiration_interval => 60000, % 1 minute
+		id_byte_length => 5, 					% 40 bits
+		republish_interval => 3600000, 			% 1 hour
+		expiration_interval => 86400000, 		% 24 hours
+		refresh_interval => 3600000, 			% 1 hour
+		check_expiration_interval => 60000, 	% 1 minute
 		timeout_interval => 2000,
 		log_level => important
 	},
 	start_network(DefaultOptions).
 
 
-%%
 %% Starts the Kademlia network with custom options.
-%%
 start_network(Options) ->
 	IdByteLength = maps:get(id_byte_length, Options, 20),
 
@@ -75,9 +70,7 @@ start_network(Options) ->
 	{ok, SupPid}.
 
 
-%%
-%% Creates a new Kademlia node with a random NodeID.
-%%
+%% Creates a new Kademlia node with a random node ID.
 start_simple_node(LocalName) ->
 	log:info("~p: starting..", [LocalName]),
 	ShellPid = self(),
@@ -102,10 +95,7 @@ start_simple_node(LocalName) ->
 	{ok, {LocalName, NodeId, NodePid}}.
 
 
-
-%%
-%% Startup of bootstrap node using Supervisor OTP
-%%
+%% Creates a new bootstrap node using the Supervisor OTP behaviour.
 start_bootstrap_node(Name, ShellPid) ->
 	log:info("~p: starting..", [Name]),
 	ChildSpec = {Name,
@@ -117,10 +107,7 @@ start_bootstrap_node(Name, ShellPid) ->
 	supervisor:start_child({global, bootstrap_sup}, ChildSpec).
 
 
-
-%%
 %% Initializes a spawned Kademlia node before calling the node loop.
-%%
 init_node(ID, BootstrapNode, LocalName, ShellPid) ->
 	Self = self(),
 	log:info("~p (~p): node initialization", [LocalName, Self]),
@@ -198,10 +185,8 @@ init_node(ID, BootstrapNode, LocalName, ShellPid) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%% PRIVATE FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-
-%%
-%% Manages the Kademlia node's behaviour.
-%%
+%% Manages the main loop of a Kademlia node, handling all incoming messages 
+%% and state transitions.
 node_loop(State) ->
 	LocalName = maps:get(local_name, State),
 	K = maps:get(k_param, State),
@@ -219,10 +204,8 @@ node_loop(State) ->
 	% calculate next republish time
 	NextRepublishTime  = calculate_next_check_time(Storage, 
 	RepublishInterval),
-	log:important("~p (~p): Next republish time: ~p", 
-		[LocalName, Self, NextRepublishTime]),
 	CurrentTime = erlang:system_time(millisecond),
-	Timeout = max(0, NextRepublishTime  - CurrentTime),
+	Timeout = max(0, NextRepublishTime - CurrentTime),
 
 	receive
 
@@ -356,7 +339,8 @@ node_loop(State) ->
 			Requester = maps:get(requester, State),
 			ToRefresh = maps:get(to_refresh, State),
 			NewToRefresh = ToRefresh - 1,
-			log:debug("~p (~p): ~p remaining buckets to refresh", [LocalName, Self, NewToRefresh]),
+			log:debug("~p (~p): ~p remaining buckets to refresh", [LocalName, Self, 
+				NewToRefresh]),
 			case NewToRefresh of
 				R when R =< 0 ->
 					% Refreshed all buckets
@@ -369,7 +353,8 @@ node_loop(State) ->
 
 		% Message received when a pending request from a node goes in Timeout
 		{timeout, _Ref, NodePid} ->
-			% log:debug("~p (~p): lookup TIMEOUT for the node ~p", [LocalName, Self, NodePid]),
+			% log:debug("~p (~p): lookup TIMEOUT for the node ~p", [LocalName, 
+			% 	Self, NodePid]),
 			NewState = handle_timeout(NodePid, State),
 			node_loop(NewState);
 
@@ -412,90 +397,96 @@ node_loop(State) ->
 			handle_republish(NewState),
 			node_loop(NewState);
 
-		%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-		%% PROTOCOL INTERFACE MESSAGES %%
-		%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
 		{'PING', FromNode} -> 
 			{FromName, _FromID, FromPid} = FromNode,
-			log:info("~p (~p): PING message from ~p (~p)", [LocalName, Self, FromName, FromPid]),
+			log:info("~p (~p): PING message from ~p (~p)", [LocalName, Self, 
+				FromName, FromPid]),
 			FromPid ! {'PONG', {LocalName, LocalId, Self}},
-
-			% BUG: this sometimes generates a loop
-			% NewBuckets = update_routing_table([FromNode], LocalId, Buckets, K, LocalName),
-			% utils:print_buckets(LocalName, Self, NewBuckets),
-			% node_loop(State#{buckets => NewBuckets});
-
 			node_loop(State);
 
 		{'STORE', Data, Node, FromPid} ->
 			{NodeName, _NodeId, NodePid} = Node,
-			log:info("~p (~p): STORE message from ~p (~p)", [LocalName, Self, NodeName, NodePid]),
+			log:info("~p (~p): STORE message from ~p (~p)", [LocalName, Self, 
+				NodeName, NodePid]),
 
 			% Save pair inside the local storage
 			{Key, Entry} = Data,
 			UpdatedStorage = store_locally(Key, Entry, Storage, RepublishInterval),
-			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval),
+			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, 
+				LocalName, IdBitLength, TimeoutInterval),
 
 			% Print new state
-			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, Key, debug),
+			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, 
+				Key, debug),
 			utils:print_storage(LocalName, Self, UpdatedStorage),
 
 			% Send ACK back to sender
-			log:debug("~p (~p): sending STORE_ACK to ~p (~p)", [LocalName, Self, NodeName, NodePid]),
+			log:debug("~p (~p): sending STORE_ACK to ~p (~p)", [LocalName, Self, 
+				NodeName, NodePid]),
 			FromPid ! {'STORE_ACK', self()},
 
 			node_loop(State#{buckets => NewBuckets, storage => UpdatedStorage});
 
 		{'FIND_NODE', TargetId, Node, FromPid} ->
 			{NodeName, _NodeId, NodePid} = Node,
-			log:info("~p (~p): FIND_NODE message from ~p (~p)", [LocalName, Self, NodeName, NodePid]),
+			log:info("~p (~p): FIND_NODE message from ~p (~p)", [LocalName, Self, 
+				NodeName, NodePid]),
 
 			% Add the sender node to the routing table
-			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval),
+			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, 
+				LocalName, IdBitLength, TimeoutInterval),
 			% utils:print_buckets(LocalName, Self, NewBuckets),
-			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, TargetId, debug),
+			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, 
+				TargetId, debug),
 
-			% Send back the K closest nodes to the target ID from this node's buckets
+			% Send back the K closest nodes to target ID from this node's buckets
 			ClosestNodes = get_closest_from_buckets(NewBuckets, TargetId, K, Node),
 			utils:print_nodes_with_distance(ClosestNodes, 
 								TargetId,
-								io_lib:format("~p (~p) - FIND_NODE: sending back ~p closest nodes", 
+								io_lib:format("~p (~p) - FIND_NODE: return ~p closest nodes", 
 										[LocalName, Self, length(ClosestNodes)])),
 			% log:debug("~p (~p) - FIND_NODE: sending back ~p closest nodes", 
 			%     [LocalName, Self, length(ClosestNodes)]),
-			FromPid ! {'FIND_NODE_RESPONSE', {nodes, ClosestNodes}, TargetId, {LocalName, LocalId, Self}},
+			FromPid ! {'FIND_NODE_RESPONSE', {nodes, ClosestNodes}, TargetId, 
+				{LocalName, LocalId, Self}},
 
 			node_loop(State#{buckets => NewBuckets});
 
 		{'FIND_VALUE', Key, Node, FromPid} ->
 			{NodeName, _NodeId, NodePid} = Node,
-			log:info("~p (~p): FIND_VALUE message from ~p (~p)", [LocalName, Self, NodeName, NodePid]),
+			log:info("~p (~p): FIND_VALUE message from ~p (~p)", [LocalName, Self, 
+				NodeName, NodePid]),
 
 			% Add the sender node to the routing table
-			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval),
+			NewBuckets = update_routing_table([Node], LocalId, Buckets, K, 
+				LocalName, IdBitLength, TimeoutInterval),
 			% utils:print_buckets(LocalName, Self, NewBuckets),
-			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, Key, debug),
+			utils:print_buckets_with_distance(LocalId, LocalName, Self, NewBuckets, 
+				Key, debug),
 
 			% Search locally for value. If not found, return closest nodes.
 			case get_entry_from_storage(Key, Storage, LocalName) of
 				{entry, Entry} when Entry =/= not_found ->
-					log:debug("~p (~p) - FIND_VALUE: sending value found locally", [LocalName, Self]),
-					FromPid ! {'FIND_VALUE_RESPONSE', {value, Entry}, Key, {LocalName, LocalId, Self}};
+					log:debug("~p (~p) - FIND_VALUE: sending value found locally", 
+						[LocalName, Self]),
+					FromPid ! {'FIND_VALUE_RESPONSE', {value, Entry}, Key, 
+						{LocalName, LocalId, Self}};
 				{entry, not_found} ->
 					ClosestNodes = get_closest_from_buckets(NewBuckets, Key, K, Node),
-					log:debug("~p (~p) - FIND_VALUE: value NOT found, returning ~p closest nodes", 
+					log:debug("~p (~p) - FIND_VALUE: NOT found, returning ~p closest", 
 						[LocalName, Self, length(ClosestNodes)]),
-					FromPid ! {'FIND_VALUE_RESPONSE', {nodes, ClosestNodes}, Key, {LocalName, LocalId, Self}}
+					FromPid ! {'FIND_VALUE_RESPONSE', {nodes, ClosestNodes}, Key, 
+						{LocalName, LocalId, Self}}
 			end,
 			node_loop(State#{buckets => NewBuckets})
 	after Timeout  ->
-		log:important("~p (~p): timeout for value REPUBLISHING", [LocalName, Self]),
+		log:important("~p (~p): timeout value REPUBLISHING", [LocalName, Self]),
 		Self ! {republish_values, Self},
 		node_loop(State)
 	end.
 
 
+%% Resets the lookup-related state variables to their initial values.
 reset_lookup_state(State) ->
 	State#{lookup_status => done,
 			pending_requests => [],
@@ -506,6 +497,7 @@ reset_lookup_state(State) ->
 			num_hops => 0}.
 
 
+%% Handles a lookup response, updating the state accordingly.
 handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
 	LocalName = maps:get(local_name, State),
 	LocalId = maps:get(local_id, State),
@@ -613,6 +605,7 @@ handle_lookup_response(ReturnedNodes, TargetID, FromNode, State) ->
 	end.
 
 
+%% Initiates or continues a node lookup process for a given target ID.
 node_lookup(TargetID, State, Alpha) ->
 	Buckets = maps:get(buckets, State),
 	LocalName = maps:get(local_name, State, unknown),
@@ -624,8 +617,8 @@ node_lookup(TargetID, State, Alpha) ->
 	Main = maps:get(self, State),
 	Self = self(),
 
-	{ClosestNodes, NewNodesCollected} = select_closest_nodes(TargetID, Alpha, Buckets,
-		NodesCollected, VisitedNodes, Main, LocalName, LocalId),
+	{ClosestNodes, NewNodesCollected} = select_closest_nodes(TargetID, Alpha, 
+		Buckets, NodesCollected, VisitedNodes, Main, LocalName, LocalId),
 	utils:print_nodes_with_distance(ClosestNodes, 
 									TargetID,
 									io_lib:format("~p (~p) - node_lookup - ClosestNodes: ", 
@@ -669,28 +662,31 @@ node_lookup(TargetID, State, Alpha) ->
 	end,
 	NewState.
 
-select_closest_nodes(TargetID, Alpha, Buckets, NodesCollected, VisitedNodes, Self, LocalName, LocalId) ->
+
+%% Selects the closest nodes to a target ID from buckets or collected nodes.
+select_closest_nodes(TargetID, Alpha, Buckets, NodesCollected, VisitedNodes, 
+	Self, LocalName, LocalId) ->
 	case NodesCollected of
 		[] ->
 			% First lookup of Alpha closest nodes from buckets
-			log:debug("~p (~p) - node_lookup: get_closest_from_buckets", [LocalName, Self]),
-			ClosestFromBuckets = get_closest_from_buckets(Buckets, TargetID, Alpha, undefined),
+			log:debug("~p (~p) - node_lookup: get_closest_from_buckets", 
+				[LocalName, Self]),
+			ClosestFromBuckets = get_closest_from_buckets(Buckets, TargetID, 
+				Alpha, undefined),
 			ClosestNodes = [Node || {_, NodeId, _} = Node <- ClosestFromBuckets, 
 			 not lists:member(Node, VisitedNodes), NodeId =/= LocalId],
 			{ClosestNodes, ClosestNodes};
 		_ ->
 			% Next lookups of Alpha closest nodes not yet visited
 			NodesNotVisited = [Node || {_, NodeId, _} = Node <- NodesCollected, 
-								 not lists:member(Node, VisitedNodes), NodeId =/= LocalId],
+								 not lists:member(Node, VisitedNodes), 
+								NodeId =/= LocalId],
 			ClosestNodes = lists:sublist(NodesNotVisited, Alpha),
 			{ClosestNodes, NodesCollected}
 	end.
 
 
-
-%%
-%% Query the nodes and set timeouts. Returns updated State.
-%%
+%% Sends queries to nodes and manages timeouts for pending requests.
 find_query(Nodes, TargetID, Mode, State) ->
 	LocalName = maps:get(local_name, State),
 	LocalId = maps:get(local_id, State),
@@ -703,7 +699,7 @@ find_query(Nodes, TargetID, Mode, State) ->
 	log:debug("~p (~p) - find_query: sending ~p queries to ~p nodes", 
 		[LocalName, MainPid, Mode, length(Nodes)]),
 
-	% For each node, send the query, start a timeout timer and add to pending requests
+	% For each node, send a query, start a timeout timer and add to pending
 	{TimeoutRefs, Pending} =
 		lists:foldl(
 			fun({_Name, _NodeId, NodePid} = Node, {RefsAcc, PendingAcc}) ->
@@ -724,6 +720,7 @@ find_query(Nodes, TargetID, Mode, State) ->
 	{TimeoutRefs, Pending}.
 
 
+%% Finalizes the lookup process based on the lookup mode and current state.
 finalize_lookup(State) ->
 	LocalName = maps:get(local_name, State),
 	Buckets = maps:get(buckets, State),
@@ -735,7 +732,8 @@ finalize_lookup(State) ->
 	Main = maps:get(self, State),
 
 	% return results and stop lookup process
-	log:debug("~p (~p): STOP LOOKUP - ZERO pending requests", [LocalName, Main]),
+	log:debug("~p (~p): STOP LOOKUP - ZERO pending requests", 
+		[LocalName, Main]),
 	case LookupMode of
 		find_value -> 
 			log:debug("~p (~p): sending not_found to shell (~p)", 
@@ -778,7 +776,8 @@ finalize_lookup(State) ->
 			subprocess_loop(ResetState)
 	end.
 
-	
+
+%% Handles timeout events for pending node requests during lookups.
 handle_timeout(NodePid, State) ->
 	TimeoutRefs = maps:get(timeout_refs, State),
 	% LocalName = maps:get(local_name, State),
@@ -786,10 +785,12 @@ handle_timeout(NodePid, State) ->
 	PendingRequests = maps:get(pending_requests, State),
 
 	% Se non è più pending, ignora
-	NodeInPending = lists:any(fun({_, _, Pid}) -> Pid =:= NodePid end, PendingRequests),
+	NodeInPending = lists:any(fun({_, _, Pid}) -> Pid =:= NodePid end, 
+		PendingRequests),
 	case NodeInPending of
 			false ->
-					log:debug("Timeout received for ~p but not in pending, ignore", [NodePid]),
+					log:debug("Timeout received for ~p but not in pending, ignore", 
+						[NodePid]),
 					% If lookup still going and no more pending requests -> STOP
 					case maps:get(lookup_status, State) of
 						in_progress ->
@@ -846,6 +847,7 @@ handle_timeout(NodePid, State) ->
 	end.
 
 
+%% Manages the subprocess loop for parallel lookup operations (e.g. republish)
 subprocess_loop(State) ->
 	LocalName = maps:get(local_name, State),
 	LookupStatus = maps:get(lookup_status, State),
@@ -877,6 +879,8 @@ subprocess_loop(State) ->
 			end
 	end.
 
+
+%% Handles the republishing of values that are due for refresh.
 handle_republish(State) ->
 	LocalName = maps:get(local_name, State),
 	LocalId = maps:get(local_id, State),
@@ -894,7 +898,8 @@ handle_republish(State) ->
 	NewRepublishTime = CurrentTime + RepublishInterval,
 	UpdatedStorage = lists:foldl(
 		fun({Key, Value, Expiry, Owner}, AccStorage) ->
-			maps:put(Key, {Value, Expiry, NewRepublishTime, Owner}, AccStorage)
+			maps:put(Key, {Value, Expiry, NewRepublishTime, Owner}, 
+				AccStorage)
 		end,
 		Storage,
 		ValuesToRepublish
@@ -910,6 +915,7 @@ handle_republish(State) ->
 				true -> CurrentTime + ExpirationInterval;
 				false -> Expiry
 			end,
+			
 			Entry = {Key, {Value, NewExpiry, Owner}},
 			spawn(fun() ->
 				LookupState = State#{
@@ -927,6 +933,7 @@ handle_republish(State) ->
 	node_loop(State#{storage => UpdatedStorage}).
 
 
+%% Handles the refreshing of routing table buckets.
 handle_refresh(State) ->
 	LocalId = maps:get(local_id, State),
 	Buckets = maps:get(buckets, State),
@@ -958,6 +965,7 @@ handle_refresh(State) ->
 	node_loop(State).
 
 
+%% Stores a value at the closest nodes found during a lookup.
 store_value_at_nodes(Nodes, Entry, State) ->
 	LocalId = maps:get(local_id, State),
 	IdByteLength = maps:get(id_byte_length, State, 20),
@@ -981,30 +989,35 @@ store_value_at_nodes(Nodes, Entry, State) ->
 
 			% Return nodes that aknowledged the store
 			AckNodes1 = collect_store_acks(length(StoreNodes), [], StoreNodes, 500),
-			log:debug("~p (~p): collected ~p store acks", [LocalName, Self, length(AckNodes1)]),
+			log:debug("~p (~p): collected ~p store acks", [LocalName, Self, 
+				length(AckNodes1)]),
 			AckNodes1;
 
 		republish ->
-			StoreNodes = send_store_queries(Nodes, Entry, LocalName, LocalId, MainPid),
+			StoreNodes = send_store_queries(Nodes, Entry, LocalName, LocalId, 
+				MainPid),
 
 			% Return nodes that aknowledged the store
 			AckNodes1 = collect_store_acks(length(StoreNodes), [], StoreNodes, 500),
-			log:debug("~p (~p): collected ~p store acks", [LocalName, Self, length(AckNodes1)]),
+			log:debug("~p (~p): collected ~p store acks", [LocalName, Self, 
+				length(AckNodes1)]),
 			AckNodes1
 	end,
 	AckNodes.
 
 
+%% Sends STORE queries to a list of nodes.
 send_store_queries(Nodes, Data, LocalName, LocalId, MainPid) ->
 	Self = self(),
-	log:debug("~p (~p): sending STORE to ~p nodes", [LocalName, MainPid, length(Nodes)]),
+	log:debug("~p (~p): sending STORE to ~p nodes", [LocalName, MainPid, 
+		length(Nodes)]),
 	[begin
 		NodePid ! {'STORE', Data, {LocalName, LocalId, MainPid}, Self},
 		{Name, NodeId, NodePid}
 	end || {Name, NodeId, NodePid} <- Nodes].
 
 
-% All nodes processed (either ACK received or timed out)
+%% Collects store acknowledgments from nodes with a timeout.
 collect_store_acks(0, SuccessfulNodes, _, _Timeout) ->
 	SuccessfulNodes;
 collect_store_acks(RemainingCount, SuccessfulNodes, AllNodes, Timeout) ->
@@ -1028,9 +1041,8 @@ collect_store_acks(RemainingCount, SuccessfulNodes, AllNodes, Timeout) ->
 	end.
 
 
-%%
-%% Checks if list L1 has closer nodes than list L2
-%%
+%% Compares two lists of nodes to determine if the first list contains 
+%% closer nodes to a target ID.
 checkCloserNodes(L1, L2, TargetID) ->
 	case {L1, L2} of
 		{[], _} -> false;
@@ -1044,16 +1056,15 @@ checkCloserNodes(L1, L2, TargetID) ->
 	end.
 
 
-%%
-%% Sends a PING request to NodePid
-%%
+%% Sends a ping request to a node and waits for a response.
 ping_request(ReceiverPid, LocalId, LocalName, TimeoutInterval) ->
 	Self = self(),
 	log:debug("~p (~p): send PING to ~p", [LocalName, Self, ReceiverPid]),
 	ReceiverPid ! {'PING', {LocalName, LocalId, self()}},
 	receive 
 		{'PONG', {FromName, _FromId, FromPid}} -> 
-			log:debug("~p (~p): received PONG from ~p (~p)", [LocalName, Self, FromName, FromPid]),
+			log:debug("~p (~p): received PONG from ~p (~p)", [LocalName, Self, 
+				FromName, FromPid]),
 			alive
 	after TimeoutInterval ->
 		log:debug("~p (~p): node ~p is DEAD", [LocalName, Self, ReceiverPid]),
@@ -1061,18 +1072,19 @@ ping_request(ReceiverPid, LocalId, LocalName, TimeoutInterval) ->
 	end.
 
 
-%%
-%% Updates the list of buckets with new nodes information
-%%
+%% Updates the routing table with new node information.
 update_routing_table([], _, Buckets, _, _, _, _) -> Buckets;
-update_routing_table([Node | Rest], LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval) ->
+update_routing_table([Node | Rest], LocalId, Buckets, K, LocalName, 
+		IdBitLength, TimeoutInterval) ->
 	{NodeName, NodeId, NodePid} = Node,
 	case NodeId =:= LocalId of
 		true ->
 			% If node is this node, skip
-			update_routing_table(Rest, LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval);
+			update_routing_table(Rest, LocalId, Buckets, K, LocalName, 
+				IdBitLength, TimeoutInterval);
 		false ->
-			BucketIndex = utils:find_bucket_index(LocalId, NodeId, IdBitLength),
+			BucketIndex = utils:find_bucket_index(LocalId, NodeId, 
+				IdBitLength),
 			log:debug("~p (~p): try to insert ~p (~p) into bucket ~p", 
 				[LocalName, self(), NodeName, NodePid, BucketIndex + 1]),
 			case BucketIndex + 1 =< length(Buckets) of
@@ -1093,7 +1105,8 @@ update_routing_table([Node | Rest], LocalId, Buckets, K, LocalName, IdBitLength,
 									% Bucket full, ping least recentrly contacted node
 									[LRUNode | RestBucket] = Bucket,
 									{_, _, LRUPid} = LRUNode,
-									Result = ping_request(LRUPid, LocalId, LocalName, TimeoutInterval),
+									Result = ping_request(LRUPid, LocalId, LocalName, 
+										TimeoutInterval),
 									case Result of
 										alive ->
 											% LRU node responded, move it to the end
@@ -1107,24 +1120,25 @@ update_routing_table([Node | Rest], LocalId, Buckets, K, LocalName, IdBitLength,
 							end
 					end,
 					% Process other nodes
-					update_routing_table(Rest, LocalId, NewBuckets, K, LocalName, IdBitLength, TimeoutInterval);
+					update_routing_table(Rest, LocalId, NewBuckets, K, 
+						LocalName, IdBitLength, TimeoutInterval);
 			false ->
-				update_routing_table(Rest, LocalId, Buckets, K, LocalName, IdBitLength, TimeoutInterval)
+				update_routing_table(Rest, LocalId, Buckets, K, LocalName, 
+					IdBitLength, TimeoutInterval)
 		end
 	end.
 
 
-%%
-%% Replaces NewBucket in BucketIndex position in the list of buckets
-%%
+%% Replaces NewBucket in BucketIndex position in the list of buckets.
 replace_bucket(Buckets, BucketIndex, NewBucket) ->
-	% Split the routing table into parts before and after the bucket to replace
+	% Split the routing table into parts before and after the bucket index
 	{Prefix, [_OldBucket|Suffix]} = lists:split(BucketIndex, Buckets),
 	
-	% Combine the prefix, new bucket, and suffix to form the new list of buckets
+	% Combine the prefix, new bucket, and suffix to form the new buckets list
 	Prefix ++ [NewBucket] ++ Suffix.
 
 
+%% Retrieves the closest nodes to a target ID from the routing buckets.
 get_closest_from_buckets(Buckets, TargetID, Alpha, FromNode) ->
 	% Flatten all nodes in all buckets
 	AllNodes = lists:flatten(Buckets),
@@ -1148,9 +1162,7 @@ get_closest_from_buckets(Buckets, TargetID, Alpha, FromNode) ->
 	lists:sublist(Sorted, Alpha).
 
 
-%%
-%% Checks if there are entries that need to be republished (CurrentTime >= RepublishTime)
-%%
+%% Finds values in storage that need to be republished.
 find_values_to_republish(Storage, _LocalName) ->
 	CurrentTime = erlang:system_time(millisecond),
 	maps:fold(fun(Key, {Value, Expiry, NextRepublishTime, Owner}, Acc) ->
@@ -1168,9 +1180,8 @@ find_values_to_republish(Storage, _LocalName) ->
 ).	
 
 
-%%
-%% Finds the minimum republish time of the values in the storage
-%%
+%% Calculates the next time when storage entries need to be checked for 
+%% republishing.
 calculate_next_check_time(Storage, RepublishInterval) ->
 	CurrentTime = erlang:system_time(millisecond),
 	maps:fold(
@@ -1182,6 +1193,7 @@ calculate_next_check_time(Storage, RepublishInterval) ->
 	).
 
 
+%% Retrieves an entry from the local storage.
 get_entry_from_storage(Key, Storage, _LocalName) ->
 	case maps:find(Key, Storage) of
 		{ok, Entry} ->
@@ -1192,23 +1204,26 @@ get_entry_from_storage(Key, Storage, _LocalName) ->
 	end.
 
 
+%% Deletes an entry from the local storage.
 delete_entry_from_storage(Key, Storage) ->
 	maps:remove(Key, Storage).
 
 
+%% Stores a value locally with appropriate timestamps.
 store_locally(Key, Entry, Storage, RepublishInterval) ->
 	CurrentTime = erlang:system_time(millisecond),
 	{Value, Expiry, Owner} = Entry,
 
 	% Set/Reset the republish time for the received value and store the entry
 	NewRepublishTime = CurrentTime + RepublishInterval,
-	UpdatedStorage = maps:put(Key, {Value, Expiry, NewRepublishTime, Owner}, Storage),
+	UpdatedStorage = maps:put(Key, {Value, Expiry, NewRepublishTime, Owner}, 
+		Storage),
 	
 	UpdatedStorage.
 
 
+%% Chooses a bootstrap node from available nodes, excluding itself.
 choose_bootstrap(OwnName) ->
-	% Select a random bootstrap node (expect itself)
 	AllNodes = ets:match_object(bootstrap_nodes, {'_', '_', '_'}),
 	OtherNodes = [{Name, ID, Pid} || {Name, ID, Pid} <- AllNodes, 
 		Name =/= OwnName],
