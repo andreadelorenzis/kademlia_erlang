@@ -78,11 +78,14 @@ generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
     %   bits up to bit pos equal to local byte + 
     %   inverted bit + 
     %   bits after bitPos equal to random byte
-    NewByte = (LocalByte band Mask) bxor (BitMask) bor (RandomByte band (255 - Mask - BitMask)) band 255,
+    NewByte = (LocalByte band Mask) bxor (BitMask) bor 
+        (RandomByte band (255 - Mask - BitMask)) band 255,
     % Remaining bytes are random
     NewIdSuffixBytes = lists:nthtail(BytePos + 1, RandomBytes),
     % Concatenates the parts
-    GeneratedID = list_to_binary(NewIdPrefixBytes ++ [NewByte] ++ NewIdSuffixBytes),
+    GeneratedID = list_to_binary(NewIdPrefixBytes 
+                                  ++ [NewByte] 
+                                  ++ NewIdSuffixBytes),
     GeneratedID.
 
 
