@@ -1,4 +1,4 @@
-### Emacs build
+### How to build
 Start the Erlang shell while pointing it to the `/ebin` folder with:
 ```erlang
 erl -pa ebin
