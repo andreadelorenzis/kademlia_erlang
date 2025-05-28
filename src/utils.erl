@@ -58,30 +58,40 @@ generate_random_id_in_bucket(LocalId, BucketIndex, IdByteLength) ->
 
     % Generate random binary ID of the specified length
     RandomId = crypto:strong_rand_bytes(IdByteLength), 
+
     % Calculate the position of the byte in LocalID
     BytePos = BucketIndex div 8,
+
     % Calculate the bit offset in the byte from the right, 
     BitPos = 7 - (BucketIndex rem 8), 
+
     % Converts the binaries to lists of bytes 
     LocalBytes = binary_to_list(LocalId),
     RandomBytes = binary_to_list(RandomId),
+
     % Prefix equal to LocalID (before BucketIndex)
     NewIdPrefixBytes = lists:sublist(LocalBytes, BytePos),
+
     % Byte in BytePos (the bucket index starts from zero, so it adds 1)
     LocalByte = lists:nth(BytePos + 1, LocalBytes),
     RandomByte = lists:nth(BytePos + 1, RandomBytes),
+
     % Mask for bits that need to be equal to local ID
     Mask = (255 bsl (BitPos + 1)),
+
     % Mask for bit that needs to be different
     BitMask = (1 bsl BitPos),
+
     % New byte is equal to:
     %   bits up to bit pos equal to local byte + 
     %   inverted bit + 
     %   bits after bitPos equal to random byte
     NewByte = (LocalByte band Mask) bxor (BitMask) bor 
         (RandomByte band (255 - Mask - BitMask)) band 255,
+        
     % Remaining bytes are random
     NewIdSuffixBytes = lists:nthtail(BytePos + 1, RandomBytes),
+    
     % Concatenates the parts
     GeneratedID = list_to_binary(NewIdPrefixBytes 
                                   ++ [NewByte] 
