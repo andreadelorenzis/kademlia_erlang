@@ -1,4 +1,4 @@
-# Kademlia in Erlang
+# Kademlia-Erlang
 A simple implementation of the Kademlia DHT (Distributed Hash Table) protocol in Erlang.
 ## Features
 - Basic Kademlia protocol: STORE, FIND_NODE, FIND_VALUE, PING
